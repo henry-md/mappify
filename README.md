@@ -7,6 +7,7 @@ Starter stack:
 - Tailwind CSS v4
 - Prisma ORM
 - PostgreSQL
+- Google OAuth with Auth.js
 
 ## Setup
 
@@ -22,13 +23,18 @@ npm install
 cp .env.example .env
 ```
 
-3. Create the first migration and generate the Prisma client:
+3. Add Google OAuth credentials in the Google Cloud Console:
+
+- Authorized JavaScript origin: `http://localhost:3000`
+- Authorized redirect URI: `http://localhost:3000/api/auth/callback/google`
+
+4. Create the first migration and generate the Prisma client:
 
 ```bash
 npx prisma migrate dev --name init
 ```
 
-4. Start the dev server:
+5. Start the dev server:
 
 ```bash
 npm run dev
@@ -40,8 +46,9 @@ Open [http://localhost:3000](http://localhost:3000).
 
 - Prisma schema lives in `prisma/schema.prisma`
 - Shared Prisma client lives in `src/lib/prisma.ts`
-- Health check route lives at `src/app/api/health/route.ts`
-- Home page reads live database status with Prisma in a server component
+- Auth config lives in `src/auth.ts`
+- Auth route handler lives in `src/app/api/auth/[...nextauth]/route.ts`
+- Google users are upserted into the `User` table on sign-in
 
 ## Useful Commands
 

@@ -1,0 +1,12 @@
+Mappify: Quiz yourself on any map or diagram
+
+Some background: There’s a website called Seterra (that was recently acquired by GeoGuessr) where you can quiz yourself on interactive maps with multiple ways to learn. For example there’s ‘learn’ mode where if you tap on a dot, the name will pop up for a few seconds. There’s ‘pin’ mode where it gives you the place and you have to tap the correct dot. There’s ‘type’ mode where they give you a dot and you have to type the name of the place. You can use it to learn the states in the US, capitals of states in the US, countries in Europe, capitals of the 50 biggest countries by population, capitals of the 100 biggest countries by population, and even geographic landmarks in the US and Europe.
+
+Problem: Seterra doesn’t allow you to create custom quizzes! There’s no platform or board where users can post their own quizzes that other people can try. So I can’t quiz myself on a map seterra doesn’t have, and their maps are quite limited. 
+
+Solution: I’m trying to create an app where the end-product would be a Seterra-like diagram with multiple quiz modes, but it would be more adaptable for the user. Users should be able to upload an image, and then be taken to a creation-view of the map where they can fine-tune the locations of the outlines to partition the territory, and fine-tune the placement of the dots inside those territories. The user should be able to finalize the partition, and have a Seterra-like interface that allows them to quiz themself on the map or diagram.
+
+Considerations: 
+The images people will upload will be png’s (so just pixels), and will likely have text over the screen. This text will need to be removed. I think chatgpt can do this in a satisfactory way if you don’t care about trying to get it to do too many things simultaneously like change the color scheme of the territories or outlines.
+We may want a cohesive theme of the site, like how Seterra generally has a light blue background for territories and white outlines. This begs the question of whether we want this spatial partitioning to be smth we get from pixels with an OpenAI call, or whether we want to reconstruct these territories with native web styling, which would also allow greater user control of map themes.
+Seterra was mostly for geography but is also used for things like anatomy diagrams. This being the case, we have to be careful not to box ourselves in with our implementation of partitions/territories so that our pipeline fails to generate non-geographical diagrams well.
