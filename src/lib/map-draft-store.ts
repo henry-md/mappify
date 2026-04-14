@@ -163,6 +163,9 @@ function hydrateDebug(debug: DraftDebugArtifacts | undefined): DraftDebugArtifac
     outlineHelperImage: debug?.outlineHelperImage ?? null,
     outlineHelperPrompt: debug?.outlineHelperPrompt ?? null,
     outlineHelperModel: debug?.outlineHelperModel ?? null,
+    outlineGridImage: debug?.outlineGridImage ?? null,
+    gridLocalizationPrompt: debug?.gridLocalizationPrompt ?? null,
+    gridLocalizationModel: debug?.gridLocalizationModel ?? null,
   };
 }
 

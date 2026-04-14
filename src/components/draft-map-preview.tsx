@@ -14,6 +14,7 @@ type DraftMapPreviewProps = {
   showSeedLines?: boolean;
   showAnchors?: boolean;
   colorAnchorsByDerivation?: boolean;
+  showDebugGrid?: boolean;
 };
 
 function polygonPoints(
@@ -72,6 +73,7 @@ export function DraftMapPreview({
   showSeedLines = false,
   showAnchors = true,
   colorAnchorsByDerivation = false,
+  showDebugGrid = false,
 }: DraftMapPreviewProps) {
   return (
     <div
@@ -92,6 +94,60 @@ export function DraftMapPreview({
         viewBox={`0 0 ${draft.image.width} ${draft.image.height}`}
         className="absolute inset-0 h-full w-full"
       >
+        {showDebugGrid
+          ? Array.from({ length: 11 }, (_, i) => i / 10).map((t) => {
+              const xPx = t * draft.image.width;
+              const yPx = t * draft.image.height;
+              const label = t.toFixed(1);
+              // Font size in viewBox units — scales with image so it's legible at any render size.
+              const fs = Math.max(8, Math.round(draft.image.width * 0.022));
+              return (
+                <g key={t}>
+                  <line
+                    x1={xPx} y1={0} x2={xPx} y2={draft.image.height}
+                    stroke="rgba(239,68,68,0.55)"
+                    strokeWidth={draft.image.width * 0.0015}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <line
+                    x1={0} y1={yPx} x2={draft.image.width} y2={yPx}
+                    stroke="rgba(239,68,68,0.55)"
+                    strokeWidth={draft.image.width * 0.0015}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <text
+                    x={xPx + fs * 0.3}
+                    y={fs * 1.1}
+                    fill="rgba(239,68,68,0.95)"
+                    fontSize={fs}
+                    fontFamily="monospace"
+                    fontWeight="bold"
+                    stroke="rgba(0,0,0,0.6)"
+                    strokeWidth={fs * 0.18}
+                    paintOrder="stroke"
+                  >
+                    {label}
+                  </text>
+                  {t > 0 ? (
+                    <text
+                      x={fs * 0.25}
+                      y={yPx - fs * 0.3}
+                      fill="rgba(239,68,68,0.95)"
+                      fontSize={fs}
+                      fontFamily="monospace"
+                      fontWeight="bold"
+                      stroke="rgba(0,0,0,0.6)"
+                      strokeWidth={fs * 0.18}
+                      paintOrder="stroke"
+                    >
+                      {label}
+                    </text>
+                  ) : null}
+                </g>
+              );
+            })
+          : null}
+
         {showSupportPolygons
           ? draft.territories.flatMap((territory) =>
               territory.supportPolygons.map((polygon, index) => (

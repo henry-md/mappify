@@ -380,6 +380,228 @@ function getGeometryStrategy(): GeometryStrategy {
   return "seeded";
 }
 
+// Grid localization types — decimal x/y in [0,1] replaces the old letter/number cells.
+type RawGridLocalizationTerritory = {
+  batchSlot?: number;
+  label?: string;
+  gridPoint?: {
+    x?: number;
+    y?: number;
+  };
+  confidence?: number;
+  notes?: string[];
+};
+
+type RawGridLocalizationPayload = {
+  summary?: string;
+  warnings?: string[];
+  territories?: RawGridLocalizationTerritory[];
+};
+
+// JSON schema for structured grid localization responses.
+const GRID_LOCALIZATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "warnings", "territories"],
+  properties: {
+    summary: { type: "string" },
+    warnings: {
+      type: "array",
+      items: { type: "string" },
+    },
+    territories: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["batchSlot", "label", "gridPoint", "confidence", "notes"],
+        properties: {
+          batchSlot: { type: "integer", minimum: 1, maximum: 100 },
+          label: { type: "string" },
+          gridPoint: {
+            type: "object",
+            additionalProperties: false,
+            required: ["x", "y"],
+            properties: {
+              x: { type: "number", minimum: 0, maximum: 1 },
+              y: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+          confidence: { type: "number" },
+          notes: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+  },
+} as const;
+
+// Padding added around the outline image so decimal axis labels sit in a clean
+// margin and do not overlap the diagram content.
+const GRID_PADDING_LEFT = 56;
+const GRID_PADDING_TOP = 40;
+const GRID_PADDING_RIGHT = 10;
+const GRID_PADDING_BOTTOM = 10;
+// Number of grid divisions on each axis (labels at 0.00, 0.10, … 1.00).
+const GRID_DIVISIONS = 10;
+
+// Build an SVG that extends the outline image with a margin for decimal axis
+// labels, then draws a red decimal grid over the content area.
+function buildOutlineGridSvg(sourceWidth: number, sourceHeight: number) {
+  const totalWidth = sourceWidth + GRID_PADDING_LEFT + GRID_PADDING_RIGHT;
+  const totalHeight = sourceHeight + GRID_PADDING_TOP + GRID_PADDING_BOTTOM;
+  // Font size scales with image so labels stay legible at any resolution.
+  const fontSize = Math.max(11, Math.min(18, Math.round(sourceWidth * 0.022)));
+
+  const parts: string[] = [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${totalWidth}" height="${totalHeight}">`,
+    // Dark margin so labels are readable against any image background.
+    `<rect width="${totalWidth}" height="${totalHeight}" fill="#111111"/>`,
+  ];
+
+  for (let i = 0; i <= GRID_DIVISIONS; i++) {
+    const t = i / GRID_DIVISIONS;
+    const label = t.toFixed(2);
+    const lineOpacity = i % 2 === 0 ? 0.55 : 0.25;
+
+    // Vertical line + top X-axis label
+    const xPx = GRID_PADDING_LEFT + t * sourceWidth;
+    parts.push(
+      `<line x1="${xPx}" y1="${GRID_PADDING_TOP}" x2="${xPx}" y2="${GRID_PADDING_TOP + sourceHeight}" stroke="#ff3b30" stroke-opacity="${lineOpacity}" stroke-width="1"/>`,
+      `<text x="${xPx}" y="${GRID_PADDING_TOP - 6}" text-anchor="middle" dominant-baseline="auto" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="${fontSize}" fill="#ff6b66" font-weight="700">${label}</text>`,
+    );
+
+    // Horizontal line + left Y-axis label
+    const yPx = GRID_PADDING_TOP + t * sourceHeight;
+    parts.push(
+      `<line x1="${GRID_PADDING_LEFT}" y1="${yPx}" x2="${GRID_PADDING_LEFT + sourceWidth}" y2="${yPx}" stroke="#ff3b30" stroke-opacity="${lineOpacity}" stroke-width="1"/>`,
+      `<text x="${GRID_PADDING_LEFT - 6}" y="${yPx}" text-anchor="end" dominant-baseline="middle" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="${fontSize}" fill="#ff6b66" font-weight="700">${label}</text>`,
+    );
+  }
+
+  parts.push(`</svg>`);
+  return parts.join("\n");
+}
+
+// Compose the outline buffer with the decimal grid SVG, extending the canvas
+// to make room for axis labels, and save it as a derived image asset.
+async function generateOutlineGridImage({
+  draftId,
+  outlineBuffer,
+  width,
+  height,
+}: {
+  draftId: string;
+  outlineBuffer: Buffer;
+  width: number;
+  height: number;
+}) {
+  const svg = buildOutlineGridSvg(width, height);
+  const gridBuffer = await sharp(outlineBuffer)
+    .extend({
+      top: GRID_PADDING_TOP,
+      bottom: GRID_PADDING_BOTTOM,
+      left: GRID_PADDING_LEFT,
+      right: GRID_PADDING_RIGHT,
+      background: { r: 17, g: 17, b: 17, alpha: 1 },
+    })
+    .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+    .png()
+    .toBuffer();
+
+  const outlineGridImage = await saveDerivedImageAsset({
+    draftId,
+    stem: "outline-grid",
+    buffer: gridBuffer,
+    mimeType: "image/png",
+    originalFilename: "outline-grid.png",
+  });
+
+  return { buffer: gridBuffer, asset: outlineGridImage };
+}
+
+function buildGridLocalizationPrompt({
+  title,
+  inferredSubject,
+  batchTargets,
+}: {
+  title: string;
+  inferredSubject: string | null;
+  batchTargets: Array<{ batchSlot: number; target: NormalizedSemanticTarget }>;
+}) {
+  const targetList = batchTargets
+    .map(
+      ({ batchSlot, target }) =>
+        `${batchSlot}. ${target.label}${target.labelBox ? " (use the rendered label in the original image to confirm this region)" : ""}`,
+    )
+    .join("\n");
+
+  return [
+    "You are locating the safest interior point for each named territory using a decimal coordinate grid.",
+    "You will receive two aligned images of the same subject:",
+    "1. the original labeled image",
+    "2. the helper image: black background + gold region borders + a red decimal grid",
+    "The red grid has axis labels along the top (X: 0.00 to 1.00) and left side (Y: 0.00 to 1.00).",
+    "These labels are in a margin OUTSIDE the diagram content — the diagram itself starts at the inner edge of the margin.",
+    "(0.000, 0.000) is the top-left of the diagram content; (1.000, 1.000) is the bottom-right.",
+    "Return one result per listed territory.",
+    "For each territory, return the exact batchSlot and label, plus a gridPoint with x and y as decimals in [0, 1].",
+    "Report x and y with exactly 3 decimal places of precision (e.g. 0.234, not 0.2 or 0.23).",
+    "Aim for the most accurate possible estimate by interpolating between grid lines.",
+    "The point must lie clearly inside the territory — not on a border, not in the black background, not outside the shape.",
+    "If several interior points would work, prefer the one that is visually most central and safest.",
+    "Use the original labeled image to identify which region corresponds to each name.",
+    "Use the red-grid helper image to judge the actual region boundaries and read off coordinates.",
+    "First identify what real place, anatomy subject, or diagram subject the images depict.",
+    inferredSubject
+      ? `The current semantic pass believes the subject is: ${inferredSubject}. Use that for context unless the images clearly contradict it.`
+      : "Infer the subject from the images before resolving ambiguous regions.",
+    "If it depicts a recognizable real-world region, use common reference maps of that region if any adjacency or coastline is ambiguous.",
+    "If it depicts a recognizable anatomy or educational diagram, use common reference diagrams of that subject if a boundary is stylized or unclear.",
+    "If the territory is tiny or uncertain, still return the best point and mention the uncertainty in notes.",
+    "Do not omit any territory. Do not add extra territories. Keep batchSlot values unchanged.",
+    `Image title: ${title}`,
+    "Batch targets:",
+    targetList,
+  ].join("\n");
+}
+
+// Convert a raw decimal gridPoint to a NormalizedPoint, or null if invalid.
+function normalizeGridPoint(point?: {
+  x?: number;
+  y?: number;
+}): NormalizedPoint | null {
+  if (
+    point?.x === undefined ||
+    point?.y === undefined ||
+    !Number.isFinite(point.x) ||
+    !Number.isFinite(point.y)
+  ) {
+    return null;
+  }
+
+  return { x: clamp01(point.x), y: clamp01(point.y) };
+}
+
+function getRegionDetectionBatchSize() {
+  const parsed = Number.parseInt(process.env.REGION_DETECTION_BATCH_SIZE ?? "", 10);
+
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 10;
+  }
+
+  return Math.min(parsed, 50);
+}
+
+function chunkArray<T>(items: T[], chunkSize: number) {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+
+  return chunks;
+}
+
 function buildSegmentationPrompt(preference: GeometryPreference) {
   return [
     "You are identifying labeled targets inside an uploaded map or diagram.",
@@ -897,7 +1119,7 @@ async function generateOutlineHelperImage({
   sourceHeight: number;
 }): Promise<{
   buffer: Buffer;
-  debug: DraftDebugArtifacts;
+  debug: Pick<DraftDebugArtifacts, "outlineHelperImage" | "outlineHelperPrompt" | "outlineHelperModel">;
 }> {
   const prompt = buildOutlineHelperPrompt({ title, inferredSubject });
   const outlineModel = process.env.OPENAI_MAP_OUTLINE_MODEL ?? "gpt-image-1";
@@ -939,6 +1161,7 @@ async function generateOutlineHelperImage({
 
   return {
     buffer: resizedBuffer,
+    // Only the outline-specific fields — callers spread these into the full debug object.
     debug: {
       outlineHelperImage,
       outlineHelperPrompt: prompt,
@@ -947,21 +1170,199 @@ async function generateOutlineHelperImage({
   };
 }
 
+async function parseRawPayloadWithGridLocalization({
+  client,
+  model,
+  title,
+  inferredSubject,
+  batchTargets,
+  originalDataUrl,
+  gridDataUrl,
+}: {
+  client: OpenAI;
+  model: string;
+  title: string;
+  inferredSubject: string | null;
+  batchTargets: Array<{ batchSlot: number; target: NormalizedSemanticTarget }>;
+  originalDataUrl: string;
+  gridDataUrl: string;
+}) {
+  const response = await client.responses.parse({
+    model,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "outline_grid_localization",
+        strict: true,
+        description:
+          "Decimal-coordinate localization for a batch of named territories using a red grid helper image.",
+        schema: GRID_LOCALIZATION_SCHEMA,
+      },
+      verbosity: "medium",
+    },
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: buildGridLocalizationPrompt({ title, inferredSubject, batchTargets }),
+          },
+          { type: "input_image", image_url: originalDataUrl, detail: "high" },
+          { type: "input_image", image_url: gridDataUrl, detail: "high" },
+        ],
+      },
+    ],
+  });
+
+  if (!response.output_parsed) {
+    throw new Error("The model did not return structured grid localization.");
+  }
+
+  return response.output_parsed as RawGridLocalizationPayload;
+}
+
+async function localizeTargetsWithGridImage({
+  client,
+  model,
+  title,
+  inferredSubject,
+  originalDataUrl,
+  gridDataUrl,
+  targets,
+}: {
+  client: OpenAI;
+  model: string;
+  title: string;
+  inferredSubject: string | null;
+  originalDataUrl: string;
+  gridDataUrl: string;
+  targets: NormalizedSemanticTarget[];
+}) {
+  const batchSize = getRegionDetectionBatchSize();
+  const targetBatches = chunkArray(
+    targets.map((target, originalIndex) => ({ originalIndex, target })),
+    batchSize,
+  );
+
+  const batchResults = await Promise.all(
+    targetBatches.map(async (batchTargets, batchIndex) => {
+      const numberedBatch = batchTargets.map(({ originalIndex, target }, index) => ({
+        batchSlot: index + 1,
+        originalIndex,
+        target,
+      }));
+
+      try {
+        const payload = await parseRawPayloadWithGridLocalization({
+          client,
+          model,
+          title,
+          inferredSubject,
+          batchTargets: numberedBatch,
+          originalDataUrl,
+          gridDataUrl,
+        });
+
+        return {
+          rangeStart: batchIndex * batchSize + 1,
+          rangeEnd: batchIndex * batchSize + batchTargets.length,
+          batchTargets: numberedBatch,
+          payload,
+          warnings: (payload.warnings ?? []).filter(Boolean),
+        };
+      } catch (error) {
+        return {
+          rangeStart: batchIndex * batchSize + 1,
+          rangeEnd: batchIndex * batchSize + batchTargets.length,
+          batchTargets: numberedBatch,
+          payload: null,
+          warnings: [error instanceof Error ? error.message : "Unknown localization error."],
+        };
+      }
+    }),
+  );
+
+  const updatedTargets = targets.slice();
+  const warnings: string[] = [];
+
+  for (const batchResult of batchResults) {
+    warnings.push(
+      ...batchResult.warnings.map(
+        (w) => `Grid localization batch ${batchResult.rangeStart}-${batchResult.rangeEnd}: ${w}`,
+      ),
+    );
+
+    if (!batchResult.payload) {
+      continue;
+    }
+
+    const bySlot = new Map(
+      (batchResult.payload.territories ?? []).map((t) => [t.batchSlot ?? -1, t]),
+    );
+    const byLabel = new Map(
+      (batchResult.payload.territories ?? []).map((t) => [
+        t.label?.trim().toLowerCase() ?? "",
+        t,
+      ]),
+    );
+
+    for (const { batchSlot, originalIndex, target } of batchResult.batchTargets) {
+      const matched =
+        bySlot.get(batchSlot) ?? byLabel.get(target.label.trim().toLowerCase()) ?? null;
+      const localized = normalizeGridPoint(matched?.gridPoint);
+
+      if (!matched) {
+        warnings.push(
+          `Grid localization batch ${batchResult.rangeStart}-${batchResult.rangeEnd} omitted ${target.label}, so the earlier semantic seed was kept.`,
+        );
+        continue;
+      }
+
+      const originalSeed = target.seedPoint;
+      updatedTargets[originalIndex] = {
+        ...target,
+        seedPoint: localized ?? target.seedPoint,
+        supportSeedPoints: [
+          ...(originalSeed ? [originalSeed] : []),
+          ...target.supportSeedPoints,
+        ],
+        rawConfidence:
+          localized && matched.confidence !== undefined
+            ? clamp01((target.rawConfidence + clamp01(matched.confidence)) / 2)
+            : target.rawConfidence,
+        rawNotes: [...target.rawNotes, ...(matched.notes?.filter(Boolean) ?? [])],
+      } satisfies NormalizedSemanticTarget;
+
+      if (!localized) {
+        warnings.push(
+          `Grid localization batch ${batchResult.rangeStart}-${batchResult.rangeEnd} returned an invalid point for ${target.label}, so the earlier semantic seed was kept.`,
+        );
+      }
+    }
+  }
+
+  return { targets: updatedTargets, warnings };
+}
+
 async function normalizeOutlinePayload({
   payload,
   preference,
   model,
   outlineBuffer,
+  normalizedTargetsOverride,
 }: {
   payload: RawParserPayload;
   preference: GeometryPreference;
   model: string | null;
   outlineBuffer: Buffer;
+  normalizedTargetsOverride?: NormalizedSemanticTarget[];
 }): Promise<ParsedDraftPayload> {
-  const { rawTerritories, normalizedTargets } = normalizeSemanticTargets(
+  const { rawTerritories, normalizedTargets: baseTargets } = normalizeSemanticTargets(
     payload,
     preference,
   );
+  const normalizedTargets = normalizedTargetsOverride ?? baseTargets;
 
   if (rawTerritories.length === 0) {
     return fallbackParsedPayload({
@@ -1084,6 +1485,9 @@ export async function parseDraftFromImage({
     outlineHelperImage: null,
     outlineHelperPrompt: null,
     outlineHelperModel: null,
+    outlineGridImage: null,
+    gridLocalizationPrompt: null,
+    gridLocalizationModel: null,
   };
 
   if (!apiKey) {
@@ -1150,15 +1554,55 @@ export async function parseDraftFromImage({
         sourceHeight: originalRaster.height,
       });
 
-      debug = outlineHelper.debug;
+      const normalizedTargets = normalizeSemanticTargets(
+        rawPayload,
+        geometryPreference,
+      ).normalizedTargets;
+      const outlineGrid = await generateOutlineGridImage({
+        draftId,
+        outlineBuffer: outlineHelper.buffer,
+        width: originalRaster.width,
+        height: originalRaster.height,
+      });
+      const representativeBatch = normalizedTargets
+        .slice(0, getRegionDetectionBatchSize())
+        .map((target, index) => ({ batchSlot: index + 1, target }));
+      debug = {
+        ...outlineHelper.debug,
+        outlineGridImage: outlineGrid.asset,
+        gridLocalizationPrompt:
+          representativeBatch.length > 0
+            ? buildGridLocalizationPrompt({
+                title,
+                inferredSubject: rawPayload.inferredSubject?.trim() || null,
+                batchTargets: representativeBatch,
+              })
+            : null,
+        gridLocalizationModel: model,
+      };
+
+      const gridLocalization = await localizeTargetsWithGridImage({
+        client,
+        model,
+        title,
+        inferredSubject: rawPayload.inferredSubject?.trim() || null,
+        originalDataUrl: dataUrl,
+        gridDataUrl: `data:image/png;base64,${outlineGrid.buffer.toString("base64")}`,
+        targets: normalizedTargets,
+      });
+      const outlinePayload = await normalizeOutlinePayload({
+        payload: rawPayload,
+        preference: geometryPreference,
+        model,
+        outlineBuffer: outlineHelper.buffer,
+        normalizedTargetsOverride: gridLocalization.targets,
+      });
 
       return {
-        payload: await normalizeOutlinePayload({
-          payload: rawPayload,
-          preference: geometryPreference,
-          model,
-          outlineBuffer: outlineHelper.buffer,
-        }),
+        payload: {
+          ...outlinePayload,
+          warnings: [...gridLocalization.warnings, ...outlinePayload.warnings],
+        },
         provider: "openai",
         model,
         strategy: geometryStrategy,

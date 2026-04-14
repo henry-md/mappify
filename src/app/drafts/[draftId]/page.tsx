@@ -42,6 +42,7 @@ export default async function DraftPage({
     (territory) => territory.supportPolygons.length > 0,
   ).length;
   const outlineHelperImage = draft.debug?.outlineHelperImage ?? null;
+  const outlineGridImage = draft.debug?.outlineGridImage ?? null;
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-8 px-6 py-10">
@@ -73,81 +74,58 @@ export default async function DraftPage({
             </p>
             <h2 className="text-xl font-semibold text-white">Separate parsing steps</h2>
             <p className="max-w-4xl text-sm leading-6 text-slate-300">
-              This strip stays above the fold so we can debug the pipeline in order.
-              The first panel is the exact helper image OpenAI returned. Cyan points
-              are seed priors, green anchors came from traced regions, blue anchors are
-              direct seed fallbacks, and amber anchors fell back to label-box centers.
+              Each panel is a separate stage of the pipeline. Red grid = the coordinate
+              reference sent to OpenAI. Cyan points are seed priors. Green anchors came
+              from traced regions; blue anchors are direct seed fallbacks; amber fell back
+              to label-box centers.
             </p>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                OpenAI seeds
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {seedPointCount}
-              </div>
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">OpenAI seeds</div>
+              <div className="mt-2 text-2xl font-semibold text-white">{seedPointCount}</div>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Segmented
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {segmentedCount}
-              </div>
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Segmented</div>
+              <div className="mt-2 text-2xl font-semibold text-white">{segmentedCount}</div>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Seed fallback
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {modelSeedFallbackCount}
-              </div>
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Seed fallback</div>
+              <div className="mt-2 text-2xl font-semibold text-white">{modelSeedFallbackCount}</div>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Hidden geometry
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {supportPolygonCount}
-              </div>
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Hidden geometry</div>
+              <div className="mt-2 text-2xl font-semibold text-white">{supportPolygonCount}</div>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Visible polygons
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {visiblePolygonCount}
-              </div>
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Visible polygons</div>
+              <div className="mt-2 text-2xl font-semibold text-white">{visiblePolygonCount}</div>
             </div>
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Label fallback
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {fallbackCount}
-              </div>
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Label fallback</div>
+              <div className="mt-2 text-2xl font-semibold text-white">{fallbackCount}</div>
             </div>
           </div>
 
-          <div className={`grid gap-6 ${outlineHelperImage ? "lg:grid-cols-3" : "lg:grid-cols-2"}`}>
-            {outlineHelperImage ? (
-              <div className="space-y-3">
-                <div>
-                  <h3 className="font-medium text-white">Step 1: OpenAI Helper Image</h3>
-                  <p className="text-sm leading-6 text-slate-400">
-                    This is the exact image OpenAI returned: black background, gold
-                    borders, and nothing else. The later tracing step consumes this
-                    artifact directly.
+          <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
+            {/* Step 1: raw outline from OpenAI (outline-generation only) */}
+            <div className="space-y-3">
+              <div>
+                <h3 className="font-medium text-white">Step 1: OpenAI Outline</h3>
+                <p className="text-sm leading-6 text-slate-400">
+                  {outlineHelperImage
+                    ? "Black background + gold borders — exactly what OpenAI returned before any tracing."
+                    : "No outline helper was generated for this strategy."}
+                </p>
+                {draft.debug?.outlineHelperModel ? (
+                  <p className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">
+                    {draft.debug.outlineHelperModel}
                   </p>
-                  {draft.debug?.outlineHelperModel ? (
-                    <p className="mt-2 text-xs uppercase tracking-[0.2em] text-slate-500">
-                      {draft.debug.outlineHelperModel}
-                    </p>
-                  ) : null}
-                </div>
-                <div className="mx-auto w-full max-w-[12rem]">
+                ) : null}
+              </div>
+              <div className="mx-auto w-full max-w-[12rem]">
+                {outlineHelperImage ? (
                   <DraftMapPreview
                     draft={draft}
                     imageAsset={outlineHelperImage}
@@ -156,42 +134,67 @@ export default async function DraftPage({
                     showSeedPoints={false}
                     showAnchors={false}
                   />
-                </div>
+                ) : (
+                  <div className="flex aspect-square items-center justify-center rounded-2xl border border-white/10 bg-black/30 text-xs text-slate-600">
+                    n/a
+                  </div>
+                )}
               </div>
-            ) : null}
+            </div>
 
+            {/* Step 2: outline + red coordinate grid */}
             <div className="space-y-3">
               <div>
-                <h3 className="font-medium text-white">
-                  Step {outlineHelperImage ? "2" : "1"}: Centroid / Region Analysis
-                </h3>
+                <h3 className="font-medium text-white">Step 2: Outline + Grid</h3>
                 <p className="text-sm leading-6 text-slate-400">
-                  Amber dashed support geometry from the contour pass, plus cyan
-                  seed-to-anchor connectors. This lets us see whether bad dots are a
-                  helper-image problem or a later tracing problem.
+                  The red grid shows the coordinate reference system OpenAI used when
+                  placing seed points and label boxes.
                 </p>
               </div>
               <div className="mx-auto w-full max-w-[12rem]">
                 <DraftMapPreview
                   draft={draft}
-                  imageAsset={outlineHelperImage ?? undefined}
+                  imageAsset={outlineHelperImage ?? outlineGridImage ?? undefined}
+                  showVisiblePolygons={false}
+                  showSupportPolygons={false}
+                  showSeedPoints={false}
+                  showAnchors={false}
+                  showDebugGrid
+                />
+              </div>
+            </div>
+
+            {/* Step 3: outline + grid + dots from structured response */}
+            <div className="space-y-3">
+              <div>
+                <h3 className="font-medium text-white">Step 3: Outline + Grid + Dots</h3>
+                <p className="text-sm leading-6 text-slate-400">
+                  Seed priors and anchors overlaid on the grid. Amber dashed support
+                  geometry shows where contour tracing landed. Use this to check whether
+                  a bad dot is an OpenAI placement error or a tracing error.
+                </p>
+              </div>
+              <div className="mx-auto w-full max-w-[12rem]">
+                <DraftMapPreview
+                  draft={draft}
+                  imageAsset={outlineHelperImage ?? outlineGridImage ?? undefined}
                   showVisiblePolygons={false}
                   showSupportPolygons
                   showSeedPoints
                   showSeedLines
                   colorAnchorsByDerivation
+                  showDebugGrid
                 />
               </div>
             </div>
 
+            {/* Step 4: final result on original image */}
             <div className="space-y-3">
               <div>
-                <h3 className="font-medium text-white">
-                  Step {outlineHelperImage ? "3" : "2"}: Final Draft
-                </h3>
+                <h3 className="font-medium text-white">Step 4: Final Draft</h3>
                 <p className="text-sm leading-6 text-slate-400">
-                  What the user-facing draft currently looks like after visibility
-                  rules hide weak outlines.
+                  The user-facing result: original image with visible polygons and anchors
+                  after all visibility rules are applied.
                 </p>
               </div>
               <div className="mx-auto w-full max-w-[12rem]">
