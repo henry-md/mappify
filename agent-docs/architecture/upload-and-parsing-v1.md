@@ -63,27 +63,26 @@ Use OpenAI vision to infer:
 - label boxes for the rendered text
 - recommended interaction mode: points, regions, or hybrid
 
-Important: OpenAI is currently the default source for first-draft anchors and polygons.
-That geometry is still considered editable draft data rather than permanent ground truth.
+Important: OpenAI is currently the default source for first-draft semantic priors.
+It should identify the subject, labels, and interior seed points, but the visible geometry should still come from the source image whenever possible.
 
 #### 3. Draft Geometry
 
-The current default path is model-first geometry:
+The current default path is outline-helper generation:
 
-- ask OpenAI vision for labels, label boxes, anchors, and optional draft polygons directly from the original image
+- ask OpenAI vision for labels, label boxes, and interior seed points directly from the original image
+- ask an OpenAI image model to generate a helper image with a black background and gold boundary lines only
+- rescale that helper image back onto the original canvas
+- trace enclosed regions from the helper image and match them back to the semantic seeds from the original image
 - keep all coordinates normalized to the source image so the overlay stays aligned
-- treat returned polygons as editable draft geometry, not immutable source of truth
 
-There is also an experimental segmentation path retained behind an environment toggle:
+There are also alternate paths retained behind environment toggles:
 
-- use model/OCR label boxes to build a text mask
-- repaint or mask label glyphs so segmentation sees the underlying territory fill
-- segment candidate regions across the full image instead of growing one region per label
-- trace polygons from those segmented regions
-- compute the anchor from the interior of the matched region mask
-- assign labels onto the segmented regions after the regions already exist
+- a legacy segmentation path that uses label boxes without semantic seeds
+- a seeded segmentation path that uses the original image plus semantic seed points
+- a model-geometry path that asks OpenAI to draft anchors and polygons directly
 
-This makes both polygon recovery and anchor placement structural consequences of the geometry pipeline rather than model guesses.
+The outline-helper default still keeps polygon recovery and final anchor placement as structural consequences of the geometry pipeline rather than direct model-authored polygons.
 
 Longer term, the "real outlines" should come from image geometry:
 
@@ -118,7 +117,8 @@ That lets the UI stay consistent while the parser gets smarter over time.
 
 - Store draft uploads on the filesystem for now.
 - Store parsed draft metadata as JSON files.
-- Keep the OpenAI prompt conservative about precision: return usable draft anchors and simplified polygons, not pixel-perfect traces.
+- Keep the OpenAI prompt conservative about precision for semantic priors: return usable label boxes and interior seeds, not pixel-perfect traces.
+- Keep the outline-helper prompt explicit about subject inference, adjacency preservation, irregular borders, black background, and gold-only closed lines.
 - Render both image and SVG overlay in the same coordinate space.
 - Always show anchor points, even when polygons exist.
 

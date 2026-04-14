@@ -27,12 +27,19 @@ export type LoadedRasterImage = {
 export type GeometryTarget = {
   label: string;
   labelBox: NormalizedBox | null;
+  seedPoint: NormalizedPoint | null;
+  supportSeedPoints: NormalizedPoint[];
   geometryModeHint: TerritoryGeometryMode;
 };
 
 type PixelPoint = {
   x: number;
   y: number;
+};
+
+type ScoredPixelPoint = {
+  point: PixelPoint;
+  score: number;
 };
 
 type PixelBox = {
@@ -47,6 +54,7 @@ type RegionResult = {
   supportPolygons: PolygonRegion[];
   visiblePolygons: PolygonRegion[];
   seedPoint: NormalizedPoint | null;
+  supportSeedPoints: NormalizedPoint[];
   derivation: AnchorDerivationMethod;
   matchScore: number | null;
   confidenceDelta: number;
@@ -1089,84 +1097,183 @@ function accumulateComponentCounts(
   return counts;
 }
 
-function fallbackRegionResult(box: NormalizedBox | null, note: string): RegionResult {
-  const anchor = box ? boxCenter(box) : { x: 0.5, y: 0.5 };
+// Sample a small neighborhood around a semantic seed so we can bias matching toward the region
+// the model believed was correct without trusting the model to draw the final outline for us.
+function accumulateComponentCountsNearPoint(
+  componentLabels: Int32Array,
+  components: SegmentedComponent[],
+  width: number,
+  height: number,
+  point: PixelPoint,
+  radius: number,
+) {
+  const counts = new Map<number, number>();
+  let totalSamples = 0;
+
+  for (let dy = -radius; dy <= radius; dy += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      if (dx * dx + dy * dy > radius * radius) {
+        continue;
+      }
+
+      const x = point.x + dx;
+      const y = point.y + dy;
+
+      if (x < 0 || y < 0 || x >= width || y >= height) {
+        continue;
+      }
+
+      totalSamples += 1;
+
+      const componentId = componentLabels[y * width + x];
+
+      if (componentId < 0 || !components[componentId]?.usable) {
+        continue;
+      }
+
+      counts.set(componentId, (counts.get(componentId) ?? 0) + 1);
+    }
+  }
+
+  return { counts, totalSamples };
+}
+
+function fallbackRegionResult(target: GeometryTarget, note: string): RegionResult {
+  const normalizedBox = normalizeBox(target.labelBox);
+  const semanticSeed = target.seedPoint ? normalizePoint(target.seedPoint) : null;
+  const anchor = semanticSeed ?? (normalizedBox ? boxCenter(normalizedBox) : { x: 0.5, y: 0.5 });
 
   return {
     anchor,
     supportPolygons: [],
     visiblePolygons: [],
-    seedPoint: null,
-    derivation: box ? "label-box-center" : "canvas-center",
+    seedPoint: semanticSeed,
+    supportSeedPoints: target.supportSeedPoints,
+    derivation: semanticSeed
+      ? "model-seed-point"
+      : normalizedBox
+        ? "label-box-center"
+        : "canvas-center",
     matchScore: null,
-    confidenceDelta: box ? -0.15 : -0.35,
+    confidenceDelta: semanticSeed ? -0.08 : normalizedBox ? -0.15 : -0.35,
     notes: [note],
   };
 }
 
+// Combine label-box evidence with semantic seed evidence so region matching stays grounded in
+// the source pixels while still using OpenAI's understanding of what the diagram depicts.
 function scoreComponentCandidates(
   target: GeometryTarget,
   image: LoadedRasterImage,
   componentLabels: Int32Array,
   components: SegmentedComponent[],
 ): ComponentCandidate[] {
+  const candidateScores = new Map<number, number>();
+  const addScore = (componentId: number, score: number) => {
+    candidateScores.set(componentId, (candidateScores.get(componentId) ?? 0) + score);
+  };
   const normalizedBox = normalizeBox(target.labelBox);
 
-  if (!normalizedBox) {
-    return [];
-  }
-
-  const innerBox = denormalizeBox(normalizedBox, image.width, image.height);
-  const outerBox = expandPixelBox(
-    innerBox,
-    image.width,
-    image.height,
-    Math.max(6, Math.round((innerBox.right - innerBox.left) * 0.25)),
-    Math.max(6, Math.round((innerBox.bottom - innerBox.top) * 0.35)),
-  );
-  const innerCounts = accumulateComponentCounts(
-    componentLabels,
-    components,
-    image.width,
-    innerBox,
-  );
-  const outerCounts = accumulateComponentCounts(
-    componentLabels,
-    components,
-    image.width,
-    outerBox,
-  );
-  const labelCenter = denormalizePoint(boxCenter(normalizedBox), image.width, image.height);
-  const candidates = new Map<number, ComponentCandidate>();
-
-  for (const [componentId, outerCount] of outerCounts.entries()) {
-    const component = components[componentId];
-
-    if (!component?.usable) {
-      continue;
-    }
-
-    const innerCount = innerCounts.get(componentId) ?? 0;
-    const innerCoverage = innerCount / pixelBoxArea(innerBox);
-    const componentCoverage = outerCount / Math.max(1, component.area);
-    const bboxCoverage = outerCount / Math.max(1, component.bboxArea);
-    const distance = Math.hypot(
-      component.centroid.x - labelCenter.x,
-      component.centroid.y - labelCenter.y,
+  if (normalizedBox) {
+    const innerBox = denormalizeBox(normalizedBox, image.width, image.height);
+    const outerBox = expandPixelBox(
+      innerBox,
+      image.width,
+      image.height,
+      Math.max(6, Math.round((innerBox.right - innerBox.left) * 0.25)),
+      Math.max(6, Math.round((innerBox.bottom - innerBox.top) * 0.35)),
     );
-    const distancePenalty =
-      distance /
-      Math.max(18, Math.max(innerBox.right - innerBox.left, innerBox.bottom - innerBox.top));
-    const score =
-      componentCoverage * 120 +
-      bboxCoverage * 80 +
-      innerCoverage * 2 -
-      distancePenalty * 1.5;
+    const innerCounts = accumulateComponentCounts(
+      componentLabels,
+      components,
+      image.width,
+      innerBox,
+    );
+    const outerCounts = accumulateComponentCounts(
+      componentLabels,
+      components,
+      image.width,
+      outerBox,
+    );
+    const labelCenter = denormalizePoint(boxCenter(normalizedBox), image.width, image.height);
+    const labelWeight = target.seedPoint ? 0.45 : 1;
 
-    candidates.set(componentId, { componentId, score });
+    for (const [componentId, outerCount] of outerCounts.entries()) {
+      const component = components[componentId];
+
+      if (!component?.usable) {
+        continue;
+      }
+
+      const innerCount = innerCounts.get(componentId) ?? 0;
+      const innerCoverage = innerCount / pixelBoxArea(innerBox);
+      const componentCoverage = outerCount / Math.max(1, component.area);
+      const bboxCoverage = outerCount / Math.max(1, component.bboxArea);
+      const distance = Math.hypot(
+        component.centroid.x - labelCenter.x,
+        component.centroid.y - labelCenter.y,
+      );
+      const distancePenalty =
+        distance /
+        Math.max(18, Math.max(innerBox.right - innerBox.left, innerBox.bottom - innerBox.top));
+      const score =
+        (componentCoverage * 120 +
+          bboxCoverage * 80 +
+          innerCoverage * 2 -
+          distancePenalty * 1.5) *
+        labelWeight;
+
+      addScore(componentId, score);
+    }
   }
 
-  return [...candidates.values()].sort((a, b) => b.score - a.score);
+  const semanticPoints = [
+    ...(target.seedPoint ? [{ point: normalizePoint(target.seedPoint), weight: 1 }] : []),
+    ...target.supportSeedPoints.map((point) => ({
+      point: normalizePoint(point),
+      weight: 0.45,
+    })),
+  ];
+
+  for (const semanticPoint of semanticPoints) {
+    const pixelPoint = denormalizePoint(semanticPoint.point, image.width, image.height);
+    const radius = semanticPoint.weight >= 1 ? 10 : 6;
+    const { counts, totalSamples } = accumulateComponentCountsNearPoint(
+      componentLabels,
+      components,
+      image.width,
+      image.height,
+      pixelPoint,
+      radius,
+    );
+
+    for (const [componentId, localCount] of counts.entries()) {
+      const component = components[componentId];
+
+      if (!component?.usable) {
+        continue;
+      }
+
+      const localCoverage = localCount / Math.max(1, totalSamples);
+      const exactHit =
+        componentLabels[pixelPoint.y * image.width + pixelPoint.x] === componentId;
+      const centroidDistance = Math.hypot(
+        component.centroid.x - pixelPoint.x,
+        component.centroid.y - pixelPoint.y,
+      );
+      const distancePenalty = centroidDistance / Math.max(12, radius * 2);
+      const score =
+        localCoverage * 240 * semanticPoint.weight +
+        (exactHit ? 140 * semanticPoint.weight : 0) -
+        distancePenalty * 3;
+
+      addScore(componentId, score);
+    }
+  }
+
+  return [...candidateScores.entries()]
+    .map(([componentId, score]) => ({ componentId, score }))
+    .sort((a, b) => b.score - a.score);
 }
 
 function assignTargetsToComponents(
@@ -1205,6 +1312,748 @@ function assignTargetsToComponents(
   return { assignments, assignmentScores };
 }
 
+function closeMaskRepeated(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  iterations: number,
+) {
+  let current = mask;
+
+  for (let index = 0; index < iterations; index += 1) {
+    current = closeMask(current, width, height);
+  }
+
+  return current;
+}
+
+function findNearbyFillPixel(
+  image: LoadedRasterImage,
+  point: PixelPoint,
+  maxRadius: number,
+): PixelPoint | null {
+  let best: ScoredPixelPoint | null = null;
+
+  for (let radius = 0; radius <= maxRadius; radius += 1) {
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) {
+          continue;
+        }
+
+        const x = point.x + dx;
+        const y = point.y + dy;
+
+        if (x < 0 || y < 0 || x >= image.width || y >= image.height) {
+          continue;
+        }
+
+        const color = getColor(image, x, y);
+
+        if (color.a === 0 || isNearBackground(color, image.background)) {
+          continue;
+        }
+
+        const score =
+          saturation(color) * 100 -
+          (isLikelyBarrierPixel(color, image.background) ? 40 : 0) -
+          Math.hypot(dx, dy);
+
+        if (!best || score > best.score) {
+          best = { point: { x, y }, score };
+        }
+      }
+    }
+
+    const currentBest = best;
+
+    if (currentBest !== null && currentBest.score > 0) {
+      return currentBest.point;
+    }
+  }
+
+  return best === null ? null : best.point;
+}
+
+function dominantSeedFillColor(
+  image: LoadedRasterImage,
+  seedPixels: PixelPoint[],
+): Color | null {
+  const samples = new Map<string, { count: number; color: Color }>();
+
+  for (const seedPixel of seedPixels) {
+    for (let dy = -2; dy <= 2; dy += 1) {
+      for (let dx = -2; dx <= 2; dx += 1) {
+        const x = seedPixel.x + dx;
+        const y = seedPixel.y + dy;
+
+        if (x < 0 || y < 0 || x >= image.width || y >= image.height) {
+          continue;
+        }
+
+        const color = getColor(image, x, y);
+
+        if (color.a === 0 || isNearBackground(color, image.background)) {
+          continue;
+        }
+
+        if (isLikelyBarrierPixel(color, image.background)) {
+          continue;
+        }
+
+        const key = quantizeColor(color, 10);
+        const entry = samples.get(key);
+
+        if (entry) {
+          entry.count += 1;
+        } else {
+          samples.set(key, { count: 1, color });
+        }
+      }
+    }
+  }
+
+  return [...samples.values()].sort((a, b) => b.count - a.count)[0]?.color ?? null;
+}
+
+function buildSeedColorMask(
+  image: LoadedRasterImage,
+  fillColor: Color,
+  threshold: number,
+) {
+  const mask = new Uint8Array(image.width * image.height);
+
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const color = getColor(image, x, y);
+      const key = y * image.width + x;
+
+      if (color.a === 0 || isNearBackground(color, image.background)) {
+        continue;
+      }
+
+      if (
+        isLikelyBarrierPixel(color, image.background) &&
+        colorDistance(color, fillColor) > 12
+      ) {
+        continue;
+      }
+
+      if (colorDistance(color, fillColor) <= threshold) {
+        mask[key] = 1;
+      }
+    }
+  }
+
+  return closeMaskRepeated(mask, image.width, image.height, 2);
+}
+
+function findNearestFilledPixel(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  point: PixelPoint,
+  maxRadius: number,
+) {
+  for (let radius = 0; radius <= maxRadius; radius += 1) {
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) {
+          continue;
+        }
+
+        const x = point.x + dx;
+        const y = point.y + dy;
+
+        if (x < 0 || y < 0 || x >= width || y >= height) {
+          continue;
+        }
+
+        if (mask[y * width + x]) {
+          return { x, y };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractConnectedMaskFromSeed(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  start: PixelPoint,
+) {
+  const visited = new Uint8Array(mask.length);
+  const queue: PixelPoint[] = [start];
+  visited[start.y * width + start.x] = 1;
+  let cursor = 0;
+  let minX = start.x;
+  let maxX = start.x;
+  let minY = start.y;
+  let maxY = start.y;
+  let area = 0;
+
+  while (cursor < queue.length) {
+    const point = queue[cursor++];
+    area += 1;
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+
+    const neighbors = [
+      { x: point.x - 1, y: point.y },
+      { x: point.x + 1, y: point.y },
+      { x: point.x, y: point.y - 1 },
+      { x: point.x, y: point.y + 1 },
+    ];
+
+    for (const neighbor of neighbors) {
+      if (
+        neighbor.x < 0 ||
+        neighbor.y < 0 ||
+        neighbor.x >= width ||
+        neighbor.y >= height
+      ) {
+        continue;
+      }
+
+      const key = neighbor.y * width + neighbor.x;
+
+      if (!mask[key] || visited[key]) {
+        continue;
+      }
+
+      visited[key] = 1;
+      queue.push(neighbor);
+    }
+  }
+
+  const bounds = { left: minX, top: minY, right: maxX, bottom: maxY };
+  const localWidth = bounds.right - bounds.left + 1;
+  const localHeight = bounds.bottom - bounds.top + 1;
+  const localMask = new Uint8Array(localWidth * localHeight);
+
+  for (const point of queue) {
+    localMask[(point.y - bounds.top) * localWidth + (point.x - bounds.left)] = 1;
+  }
+
+  return {
+    area,
+    bounds,
+    localMask,
+    localWidth,
+    localHeight,
+  };
+}
+
+function deriveSeededRegionResult({
+  image,
+  target,
+  geometryPreference,
+  diagramKind,
+}: {
+  image: LoadedRasterImage;
+  target: GeometryTarget;
+  geometryPreference: GeometryPreference;
+  diagramKind: DiagramKind;
+}): RegionResult | null {
+  const semanticPoints = [
+    ...(target.seedPoint ? [target.seedPoint] : []),
+    ...target.supportSeedPoints,
+  ].map((point) => normalizePoint(point));
+
+  if (semanticPoints.length === 0) {
+    return null;
+  }
+
+  const snappedSeedPixels = semanticPoints
+    .map((point) => findNearbyFillPixel(image, denormalizePoint(point, image.width, image.height), 24))
+    .filter((point): point is PixelPoint => point !== null);
+
+  if (snappedSeedPixels.length === 0) {
+    return null;
+  }
+
+  const fillColor = dominantSeedFillColor(image, snappedSeedPixels);
+
+  if (!fillColor) {
+    return null;
+  }
+
+  for (const threshold of [18, 26, 34, 46, 60]) {
+    const mask = buildSeedColorMask(image, fillColor, threshold);
+    const start =
+      findNearestFilledPixel(mask, image.width, image.height, snappedSeedPixels[0], 24) ??
+      snappedSeedPixels
+        .slice(1)
+        .map((point) => findNearestFilledPixel(mask, image.width, image.height, point, 24))
+        .find((point): point is PixelPoint => point !== null);
+
+    if (!start) {
+      continue;
+    }
+
+    const component = extractConnectedMaskFromSeed(mask, image.width, image.height, start);
+
+    if (component.area < MIN_COMPONENT_AREA) {
+      continue;
+    }
+
+    const visualCenter =
+      findVisualCenter(
+        component.localMask,
+        component.localWidth,
+        component.localHeight,
+        {
+          x: start.x - component.bounds.left,
+          y: start.y - component.bounds.top,
+        },
+      ) ?? {
+        x: start.x - component.bounds.left,
+        y: start.y - component.bounds.top,
+      };
+    const polygons = maskToPolygons(
+      component.localMask,
+      component.localWidth,
+      component.localHeight,
+      {
+        offsetX: component.bounds.left,
+        offsetY: component.bounds.top,
+        fullWidth: image.width,
+        fullHeight: image.height,
+      },
+    )
+      .filter((polygon) => geometryArea([polygon]) > 0.0002)
+      .sort((a, b) => geometryArea([b]) - geometryArea([a]));
+
+    if (polygons.length === 0) {
+      continue;
+    }
+
+    const normalizedArea = geometryArea(polygons);
+    const supportHits = snappedSeedPixels.filter((point) => {
+      const localX = point.x - component.bounds.left;
+      const localY = point.y - component.bounds.top;
+
+      if (
+        localX < 0 ||
+        localY < 0 ||
+        localX >= component.localWidth ||
+        localY >= component.localHeight
+      ) {
+        return false;
+      }
+
+      return !!component.localMask[localY * component.localWidth + localX];
+    }).length;
+    const allowVisiblePolygons =
+      geometryPreference !== "points" &&
+      target.geometryModeHint !== "point" &&
+      diagramKind !== "medical" &&
+      normalizedArea >= MIN_VISIBLE_POLYGON_AREA_RATIO &&
+      supportHits >= 1;
+
+    return {
+      anchor: toNormalizedPoint(
+        {
+          x: component.bounds.left + visualCenter.x,
+          y: component.bounds.top + visualCenter.y,
+        },
+        image.width,
+        image.height,
+      ),
+      supportPolygons: polygons,
+      visiblePolygons: allowVisiblePolygons ? polygons : [],
+      seedPoint: target.seedPoint,
+      supportSeedPoints: target.supportSeedPoints,
+      derivation: "segmented-region-center",
+      matchScore: 5 + supportHits * 2 + normalizedArea * 100,
+      confidenceDelta: allowVisiblePolygons ? 0.24 : 0.14,
+      notes: [
+        "Anchor derived from a seed-grown color region starting from the OpenAI semantic seed and refined on the source image.",
+        ...(allowVisiblePolygons
+          ? []
+          : ["Visible outlines were withheld because the seed-grown mask still looked too weak for a user-facing region draft."]),
+      ],
+    };
+  }
+
+  return null;
+}
+
+function dominantOutlineColor(image: LoadedRasterImage) {
+  const samples = new Map<string, { count: number; color: Color }>();
+
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const color = getColor(image, x, y);
+
+      if (color.a === 0 || isNearBackground(color, image.background)) {
+        continue;
+      }
+
+      const key = quantizeColor(color, 12);
+      const entry = samples.get(key);
+
+      if (entry) {
+        entry.count += 1;
+      } else {
+        samples.set(key, { count: 1, color });
+      }
+    }
+  }
+
+  return [...samples.values()].sort((a, b) => b.count - a.count)[0]?.color ?? null;
+}
+
+function buildOutlineBarrierMask(
+  image: LoadedRasterImage,
+  outlineColor: Color,
+  threshold: number,
+) {
+  const mask = new Uint8Array(image.width * image.height);
+
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const color = getColor(image, x, y);
+      const key = y * image.width + x;
+
+      if (color.a === 0 || isNearBackground(color, image.background)) {
+        continue;
+      }
+
+      if (colorDistance(color, outlineColor) <= threshold) {
+        mask[key] = 1;
+      }
+    }
+  }
+
+  return closeMaskRepeated(
+    dilateMask(mask, image.width, image.height, 1),
+    image.width,
+    image.height,
+    1,
+  );
+}
+
+function floodExterior(barrierMask: Uint8Array, width: number, height: number) {
+  const exterior = new Uint8Array(barrierMask.length);
+  const queue: PixelPoint[] = [];
+
+  const enqueue = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) {
+      return;
+    }
+
+    const key = y * width + x;
+
+    if (barrierMask[key] || exterior[key]) {
+      return;
+    }
+
+    exterior[key] = 1;
+    queue.push({ x, y });
+  };
+
+  for (let x = 0; x < width; x += 1) {
+    enqueue(x, 0);
+    enqueue(x, height - 1);
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    enqueue(0, y);
+    enqueue(width - 1, y);
+  }
+
+  let cursor = 0;
+
+  while (cursor < queue.length) {
+    const point = queue[cursor++];
+    const neighbors = [
+      { x: point.x - 1, y: point.y },
+      { x: point.x + 1, y: point.y },
+      { x: point.x, y: point.y - 1 },
+      { x: point.x, y: point.y + 1 },
+    ];
+
+    for (const neighbor of neighbors) {
+      enqueue(neighbor.x, neighbor.y);
+    }
+  }
+
+  return exterior;
+}
+
+function segmentOutlineInterior(
+  image: LoadedRasterImage,
+  barrierMask: Uint8Array,
+): { componentLabels: Int32Array; components: SegmentedComponent[] } {
+  const exteriorMask = floodExterior(barrierMask, image.width, image.height);
+  const componentLabels = new Int32Array(image.width * image.height);
+  componentLabels.fill(-1);
+  const components: SegmentedComponent[] = [];
+
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const startKey = y * image.width + x;
+
+      if (componentLabels[startKey] !== -1 || barrierMask[startKey] || exteriorMask[startKey]) {
+        continue;
+      }
+
+      const componentId = components.length;
+      const queue: PixelPoint[] = [{ x, y }];
+      componentLabels[startKey] = componentId;
+      let cursor = 0;
+      let area = 0;
+      let minX = x;
+      let maxX = x;
+      let minY = y;
+      let maxY = y;
+      let sumX = 0;
+      let sumY = 0;
+
+      while (cursor < queue.length) {
+        const point = queue[cursor++];
+        area += 1;
+        minX = Math.min(minX, point.x);
+        maxX = Math.max(maxX, point.x);
+        minY = Math.min(minY, point.y);
+        maxY = Math.max(maxY, point.y);
+        sumX += point.x;
+        sumY += point.y;
+
+        const neighbors = [
+          { x: point.x - 1, y: point.y },
+          { x: point.x + 1, y: point.y },
+          { x: point.x, y: point.y - 1 },
+          { x: point.x, y: point.y + 1 },
+        ];
+
+        for (const neighbor of neighbors) {
+          if (
+            neighbor.x < 0 ||
+            neighbor.y < 0 ||
+            neighbor.x >= image.width ||
+            neighbor.y >= image.height
+          ) {
+            continue;
+          }
+
+          const key = neighbor.y * image.width + neighbor.x;
+
+          if (componentLabels[key] !== -1 || barrierMask[key] || exteriorMask[key]) {
+            continue;
+          }
+
+          componentLabels[key] = componentId;
+          queue.push(neighbor);
+        }
+      }
+
+      const bounds = { left: minX, top: minY, right: maxX, bottom: maxY };
+      const bboxArea = pixelBoxArea(bounds);
+      const usable = area >= MIN_COMPONENT_AREA;
+
+      if (!usable) {
+        components.push({
+          id: componentId,
+          area,
+          bboxArea,
+          bounds,
+          centroid: {
+            x: sumX / Math.max(1, area),
+            y: sumY / Math.max(1, area),
+          },
+          anchor: { x: 0.5, y: 0.5 },
+          polygons: [],
+          normalizedArea: 0,
+          usable: false,
+        });
+        continue;
+      }
+
+      const { localMask, localWidth, localHeight } = extractComponentMask(
+        componentId,
+        componentLabels,
+        image.width,
+        bounds,
+      );
+      const activeMask = closeMaskRepeated(localMask, localWidth, localHeight, 1);
+      const target = {
+        x: Math.round(sumX / area) - bounds.left,
+        y: Math.round(sumY / area) - bounds.top,
+      };
+      const center =
+        findVisualCenter(activeMask, localWidth, localHeight, target) ??
+        findVisualCenter(localMask, localWidth, localHeight, target) ??
+        {
+          x: Math.max(0, Math.min(localWidth - 1, target.x)),
+          y: Math.max(0, Math.min(localHeight - 1, target.y)),
+        };
+      const polygons = maskToPolygons(activeMask, localWidth, localHeight, {
+        offsetX: bounds.left,
+        offsetY: bounds.top,
+        fullWidth: image.width,
+        fullHeight: image.height,
+      })
+        .filter((polygon) => geometryArea([polygon]) > 0.0002)
+        .sort((a, b) => geometryArea([b]) - geometryArea([a]));
+      const normalizedArea = geometryArea(polygons);
+
+      components.push({
+        id: componentId,
+        area,
+        bboxArea,
+        bounds,
+        centroid: {
+          x: sumX / area,
+          y: sumY / area,
+        },
+        anchor: toNormalizedPoint(
+          { x: bounds.left + center.x, y: bounds.top + center.y },
+          image.width,
+          image.height,
+        ),
+        polygons,
+        normalizedArea,
+        usable: polygons.length > 0,
+      });
+    }
+  }
+
+  return { componentLabels, components };
+}
+
+// The outline-helper image reduces the problem to "gold lines on black"; once those
+// lines become barrier pixels, enclosed black pockets naturally become region masks.
+function segmentOutlineHelperImage(image: LoadedRasterImage) {
+  const outlineColor = dominantOutlineColor(image);
+
+  if (!outlineColor) {
+    const emptyLabels = new Int32Array(image.width * image.height);
+    emptyLabels.fill(-1);
+
+    return {
+      componentLabels: emptyLabels,
+      components: [] as SegmentedComponent[],
+    };
+  }
+
+  let best:
+    | {
+        componentLabels: Int32Array;
+        components: SegmentedComponent[];
+        score: number;
+      }
+    | null = null;
+
+  for (const threshold of [28, 40, 56, 72, 88]) {
+    const barrierMask = buildOutlineBarrierMask(image, outlineColor, threshold);
+    const segmented = segmentOutlineInterior(image, barrierMask);
+    const usableComponents = segmented.components.filter((component) => component.usable);
+    const score =
+      usableComponents.length * 1000 +
+      usableComponents.reduce((sum, component) => sum + component.area, 0);
+
+    if (!best || score > best.score) {
+      best = {
+        ...segmented,
+        score,
+      };
+    }
+  }
+
+  return (
+    best ??
+    (() => {
+      const emptyLabels = new Int32Array(image.width * image.height);
+      emptyLabels.fill(-1);
+
+      return {
+        componentLabels: emptyLabels,
+        components: [] as SegmentedComponent[],
+      };
+    })()
+  );
+}
+
+export async function deriveGeometryFromOutlineImage({
+  image,
+  targets,
+  geometryPreference,
+  diagramKind,
+}: {
+  image: LoadedRasterImage;
+  targets: GeometryTarget[];
+  geometryPreference: GeometryPreference;
+  diagramKind: DiagramKind;
+}): Promise<RegionResult[]> {
+  const segmented = segmentOutlineHelperImage(image);
+  const assignmentData = assignTargetsToComponents(
+    targets,
+    image,
+    segmented.componentLabels,
+    segmented.components,
+  );
+
+  return targets.map((target, index) => {
+    const componentId = assignmentData.assignments[index] ?? null;
+    const matchScore = assignmentData.assignmentScores[index] ?? -Infinity;
+
+    if (componentId === null || componentId === undefined || matchScore < MIN_ANCHOR_MATCH_SCORE) {
+      return fallbackRegionResult(
+        target,
+        target.seedPoint
+          ? "No trustworthy helper-image region matched this target, so the current point is using the OpenAI seed location."
+          : "No trustworthy helper-image region matched this label, so the point fell back to the label center.",
+      );
+    }
+
+    const component = segmented.components[componentId];
+
+    if (!component || !component.usable) {
+      return fallbackRegionResult(
+        target,
+        target.seedPoint
+          ? "The helper-image region was not stable enough to keep, so the current point is using the OpenAI seed location."
+          : "The helper-image region was not stable enough to keep, so the point fell back to the label center.",
+      );
+    }
+
+    const allowVisiblePolygons =
+      geometryPreference !== "points" &&
+      target.geometryModeHint !== "point" &&
+      diagramKind !== "medical" &&
+      component.normalizedArea >= MIN_VISIBLE_POLYGON_AREA_RATIO &&
+      matchScore >= MIN_VISIBLE_POLYGON_MATCH_SCORE;
+    const notes = [
+      "Anchor derived from a region enclosed by OpenAI-generated gold outline boundaries and matched back to the source-image semantic seeds.",
+    ];
+
+    if (!allowVisiblePolygons && component.polygons.length > 0) {
+      notes.push(
+        "Outline tracing was strong enough to place an anchor, but visible outlines were withheld for this draft.",
+      );
+    }
+
+    return {
+      anchor: component.anchor,
+      supportPolygons: component.polygons,
+      visiblePolygons: allowVisiblePolygons ? component.polygons : [],
+      seedPoint: target.seedPoint,
+      supportSeedPoints: target.supportSeedPoints,
+      derivation: "segmented-region-center",
+      matchScore,
+      confidenceDelta: allowVisiblePolygons ? 0.24 : 0.12,
+      notes,
+    } satisfies RegionResult;
+  });
+}
+
 export async function deriveGeometryFromImage({
   image,
   buffer,
@@ -1219,36 +2068,64 @@ export async function deriveGeometryFromImage({
   diagramKind: DiagramKind;
 }): Promise<RegionResult[]> {
   const raster = image ?? (await loadRasterImage(buffer));
-  const labelBoxes = targets
-    .map((target) => normalizeBox(target.labelBox))
-    .filter((box): box is NormalizedBox => !!box);
-  const { sanitizedPixels, textMask } = eraseLabelText(raster, labelBoxes);
-  const { componentLabels, components } = segmentImage(raster, sanitizedPixels, textMask);
-  const { assignments, assignmentScores } = assignTargetsToComponents(
-    targets,
-    raster,
-    componentLabels,
-    components,
-  );
+  const canUseSeededGrowth = targets.some((target) => target.seedPoint);
+  let componentLabels: Int32Array | null = null;
+  let components: SegmentedComponent[] | null = null;
+  let assignments: Array<number | null> | null = null;
+  let assignmentScores: number[] | null = null;
+
+  if (!canUseSeededGrowth || targets.some((target) => !target.seedPoint)) {
+    const labelBoxes = targets
+      .map((target) => normalizeBox(target.labelBox))
+      .filter((box): box is NormalizedBox => !!box);
+    const { sanitizedPixels, textMask } = eraseLabelText(raster, labelBoxes);
+    const segmented = segmentImage(raster, sanitizedPixels, textMask);
+    componentLabels = segmented.componentLabels;
+    components = segmented.components;
+    const assignmentData = assignTargetsToComponents(
+      targets,
+      raster,
+      componentLabels,
+      components,
+    );
+    assignments = assignmentData.assignments;
+    assignmentScores = assignmentData.assignmentScores;
+  }
 
   return targets.map((target, index) => {
-    const normalizedBox = normalizeBox(target.labelBox);
-    const componentId = assignments[index];
-    const matchScore = assignmentScores[index];
+    if (target.seedPoint) {
+      const seededResult = deriveSeededRegionResult({
+        image: raster,
+        target,
+        geometryPreference,
+        diagramKind,
+      });
+
+      if (seededResult) {
+        return seededResult;
+      }
+    }
+
+    const componentId = assignments?.[index] ?? null;
+    const matchScore = assignmentScores?.[index] ?? -Infinity;
 
     if (componentId === null || componentId === undefined || matchScore < MIN_ANCHOR_MATCH_SCORE) {
       return fallbackRegionResult(
-        normalizedBox,
-        "No trustworthy segmented region matched this label, so the point fell back to the label center.",
+        target,
+        target.seedPoint
+          ? "No trustworthy segmented region matched this target, so the current point is using the OpenAI seed location."
+          : "No trustworthy segmented region matched this label, so the point fell back to the label center.",
       );
     }
 
-    const component = components[componentId];
+    const component = components?.[componentId];
 
     if (!component || !component.usable) {
       return fallbackRegionResult(
-        normalizedBox,
-        "The matched region was not stable enough to keep, so the point fell back to the label center.",
+        target,
+        target.seedPoint
+          ? "The matched region was not stable enough to keep, so the current point is using the OpenAI seed location."
+          : "The matched region was not stable enough to keep, so the point fell back to the label center.",
       );
     }
 
@@ -1259,7 +2136,9 @@ export async function deriveGeometryFromImage({
       component.normalizedArea >= MIN_VISIBLE_POLYGON_AREA_RATIO &&
       matchScore >= MIN_VISIBLE_POLYGON_MATCH_SCORE;
     const notes = [
-      "Anchor derived from the visual center of a region segmented from the full image after masking label text.",
+      target.seedPoint
+        ? "Anchor derived from the visual center of a raster region matched using OpenAI semantic seed points plus image segmentation."
+        : "Anchor derived from the visual center of a region segmented from the full image after masking label text.",
     ];
 
     if (!allowVisiblePolygons && component.polygons.length > 0) {
@@ -1272,7 +2151,8 @@ export async function deriveGeometryFromImage({
       anchor: component.anchor,
       supportPolygons: component.polygons,
       visiblePolygons: allowVisiblePolygons ? component.polygons : [],
-      seedPoint: null,
+      seedPoint: target.seedPoint,
+      supportSeedPoints: target.supportSeedPoints,
       derivation: "segmented-region-center",
       matchScore,
       confidenceDelta: allowVisiblePolygons ? 0.22 : 0.1,

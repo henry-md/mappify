@@ -37,6 +37,7 @@ export async function createDraftAction(formData: FormData) {
 
   const { asset, buffer, dataUrl } = await saveUploadedImage(draftId, fileValue);
   const parsed = await parseDraftFromImage({
+    draftId,
     buffer,
     dataUrl,
     title,
@@ -52,13 +53,16 @@ export async function createDraftAction(formData: FormData) {
     parsing: {
       provider: parsed.provider,
       model: parsed.model,
+      geometryStrategy: parsed.strategy,
       diagramKind: parsed.payload.diagramKind,
       recommendedInteraction: parsed.payload.recommendedInteraction,
       geometryPreference,
+      inferredSubject: parsed.payload.inferredSubject,
       summary: parsed.payload.summary,
       warnings: parsed.payload.warnings,
     },
     territories: parsed.payload.territories,
+    debug: parsed.debug,
   };
 
   await saveDraft(draft);

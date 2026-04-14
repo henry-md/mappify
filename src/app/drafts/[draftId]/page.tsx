@@ -29,8 +29,11 @@ export default async function DraftPage({
   const segmentedCount = draft.territories.filter(
     (territory) => territory.anchorDerivation === "segmented-region-center",
   ).length;
-  const modelDerivedCount = draft.territories.filter(
-    (territory) => territory.anchorDerivation === "model-vision",
+  const modelSeedFallbackCount = draft.territories.filter(
+    (territory) => territory.anchorDerivation === "model-seed-point",
+  ).length;
+  const seedPointCount = draft.territories.filter(
+    (territory) => territory.seedPoint !== null,
   ).length;
   const visiblePolygonCount = draft.territories.filter(
     (territory) => territory.polygons.length > 0,
@@ -38,6 +41,7 @@ export default async function DraftPage({
   const supportPolygonCount = draft.territories.filter(
     (territory) => territory.supportPolygons.length > 0,
   ).length;
+  const outlineHelperImage = draft.debug?.outlineHelperImage ?? null;
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-8 px-6 py-10">
@@ -57,8 +61,146 @@ export default async function DraftPage({
           <div className="text-slate-500">
             {draft.parsing.recommendedInteraction} mode
           </div>
+          <div className="text-slate-500">{draft.parsing.geometryStrategy} parser</div>
         </div>
       </div>
+
+      {debugUiEnabled ? (
+        <section className="space-y-5 rounded-[2rem] border border-cyan-500/20 bg-cyan-500/6 p-6">
+          <div className="space-y-2">
+            <p className="text-xs uppercase tracking-[0.25em] text-cyan-200/80">
+              Debug Pipeline
+            </p>
+            <h2 className="text-xl font-semibold text-white">Separate parsing steps</h2>
+            <p className="max-w-4xl text-sm leading-6 text-slate-300">
+              This strip stays above the fold so we can debug the pipeline in order.
+              The first panel is the exact helper image OpenAI returned. Cyan points
+              are seed priors, green anchors came from traced regions, blue anchors are
+              direct seed fallbacks, and amber anchors fell back to label-box centers.
+            </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                OpenAI seeds
+              </div>
+              <div className="mt-2 text-2xl font-semibold text-white">
+                {seedPointCount}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                Segmented
+              </div>
+              <div className="mt-2 text-2xl font-semibold text-white">
+                {segmentedCount}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                Seed fallback
+              </div>
+              <div className="mt-2 text-2xl font-semibold text-white">
+                {modelSeedFallbackCount}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                Hidden geometry
+              </div>
+              <div className="mt-2 text-2xl font-semibold text-white">
+                {supportPolygonCount}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                Visible polygons
+              </div>
+              <div className="mt-2 text-2xl font-semibold text-white">
+                {visiblePolygonCount}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
+                Label fallback
+              </div>
+              <div className="mt-2 text-2xl font-semibold text-white">
+                {fallbackCount}
+              </div>
+            </div>
+          </div>
+
+          <div className={`grid gap-6 ${outlineHelperImage ? "lg:grid-cols-3" : "lg:grid-cols-2"}`}>
+            {outlineHelperImage ? (
+              <div className="space-y-3">
+                <div>
+                  <h3 className="font-medium text-white">Step 1: OpenAI Helper Image</h3>
+                  <p className="text-sm leading-6 text-slate-400">
+                    This is the exact image OpenAI returned: black background, gold
+                    borders, and nothing else. The later tracing step consumes this
+                    artifact directly.
+                  </p>
+                  {draft.debug?.outlineHelperModel ? (
+                    <p className="mt-2 text-xs uppercase tracking-[0.2em] text-slate-500">
+                      {draft.debug.outlineHelperModel}
+                    </p>
+                  ) : null}
+                </div>
+                <div className="mx-auto w-full max-w-[12rem]">
+                  <DraftMapPreview
+                    draft={draft}
+                    imageAsset={outlineHelperImage}
+                    showVisiblePolygons={false}
+                    showSupportPolygons={false}
+                    showSeedPoints={false}
+                    showAnchors={false}
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            <div className="space-y-3">
+              <div>
+                <h3 className="font-medium text-white">
+                  Step {outlineHelperImage ? "2" : "1"}: Centroid / Region Analysis
+                </h3>
+                <p className="text-sm leading-6 text-slate-400">
+                  Amber dashed support geometry from the contour pass, plus cyan
+                  seed-to-anchor connectors. This lets us see whether bad dots are a
+                  helper-image problem or a later tracing problem.
+                </p>
+              </div>
+              <div className="mx-auto w-full max-w-[12rem]">
+                <DraftMapPreview
+                  draft={draft}
+                  imageAsset={outlineHelperImage ?? undefined}
+                  showVisiblePolygons={false}
+                  showSupportPolygons
+                  showSeedPoints
+                  showSeedLines
+                  colorAnchorsByDerivation
+                />
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <h3 className="font-medium text-white">
+                  Step {outlineHelperImage ? "3" : "2"}: Final Draft
+                </h3>
+                <p className="text-sm leading-6 text-slate-400">
+                  What the user-facing draft currently looks like after visibility
+                  rules hide weak outlines.
+                </p>
+              </div>
+              <div className="mx-auto w-full max-w-[12rem]">
+                <DraftMapPreview draft={draft} />
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       <div className="grid gap-8 lg:grid-cols-[1.5fr_0.9fr]">
         <DraftMapPreview draft={draft} />
@@ -72,6 +214,15 @@ export default async function DraftPage({
                   <li key={warning}>{warning}</li>
                 ))}
               </ul>
+            </section>
+          ) : null}
+
+          {draft.parsing.inferredSubject ? (
+            <section className="rounded-2xl border border-cyan-500/20 bg-cyan-500/8 p-5">
+              <h2 className="text-sm font-semibold text-cyan-100">Inferred subject</h2>
+              <p className="mt-2 text-sm leading-6 text-cyan-50/90">
+                {draft.parsing.inferredSubject}
+              </p>
             </section>
           ) : null}
 
@@ -120,104 +271,6 @@ export default async function DraftPage({
         </aside>
       </div>
 
-      {debugUiEnabled ? (
-        <section className="space-y-5 rounded-[2rem] border border-cyan-500/20 bg-cyan-500/6 p-6">
-          <div className="space-y-2">
-            <p className="text-xs uppercase tracking-[0.25em] text-cyan-200/80">
-              Debug UI
-            </p>
-            <h2 className="text-xl font-semibold text-white">Parser inspection</h2>
-            <p className="max-w-3xl text-sm leading-6 text-slate-300">
-              Blue anchors came directly from the OpenAI geometry call. Green anchors
-              came from segmented regions. Amber anchors fell back to label-box centers.
-              Purple rectangles are label boxes, and the amber dashed outlines show the
-              hidden geometry layer currently stored on the draft.
-            </p>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Model geometry
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {modelDerivedCount}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Segmented
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {segmentedCount}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Fallback
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {fallbackCount}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Visible polygons
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {visiblePolygonCount}
-              </div>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                Hidden geometry
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-white">
-                {supportPolygonCount}
-              </div>
-            </div>
-          </div>
-
-          <div className="grid gap-6 xl:grid-cols-2">
-            <div className="space-y-3">
-              <div>
-                <h3 className="font-medium text-white">Step 1: Label boxes</h3>
-                <p className="text-sm leading-6 text-slate-400">
-                  Inspect whether the model returned boxes that actually hug the text we
-                  think it saw.
-                </p>
-              </div>
-              <DraftMapPreview
-                draft={draft}
-                showInlineLabels
-                showVisiblePolygons={false}
-                showSupportPolygons={false}
-                showLabelBoxes
-                colorAnchorsByDerivation
-              />
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <h3 className="font-medium text-white">Step 2: Support geometry</h3>
-                <p className="text-sm leading-6 text-slate-400">
-                  Amber dashed regions show the hidden geometry stored on the draft,
-                  whether it came from the model directly or from the old segmentation
-                  pipeline.
-                </p>
-              </div>
-              <DraftMapPreview
-                draft={draft}
-                showInlineLabels
-                showVisiblePolygons={false}
-                showSupportPolygons
-                showLabelBoxes={false}
-                colorAnchorsByDerivation
-              />
-            </div>
-          </div>
-        </section>
-      ) : null}
     </main>
   );
 }

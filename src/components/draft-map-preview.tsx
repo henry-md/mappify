@@ -1,13 +1,18 @@
 import Image from "next/image";
+import type { ReactNode } from "react";
 
-import type { MapDraft } from "@/lib/map-draft-types";
+import type { ImageAsset, MapDraft } from "@/lib/map-draft-types";
 
 type DraftMapPreviewProps = {
   draft: MapDraft;
+  imageAsset?: ImageAsset;
   showInlineLabels?: boolean;
   showVisiblePolygons?: boolean;
   showSupportPolygons?: boolean;
   showLabelBoxes?: boolean;
+  showSeedPoints?: boolean;
+  showSeedLines?: boolean;
+  showAnchors?: boolean;
   colorAnchorsByDerivation?: boolean;
 };
 
@@ -36,6 +41,13 @@ function anchorStyles(colorAnchorsByDerivation: boolean, derivation: string) {
     };
   }
 
+  if (derivation === "model-seed-point") {
+    return {
+      fill: "#60a5fa",
+      stroke: "rgba(30, 64, 175, 0.95)",
+    };
+  }
+
   if (derivation === "segmented-region-center") {
     return {
       fill: "#34d399",
@@ -51,22 +63,27 @@ function anchorStyles(colorAnchorsByDerivation: boolean, derivation: string) {
 
 export function DraftMapPreview({
   draft,
+  imageAsset = draft.image,
   showInlineLabels = false,
   showVisiblePolygons = true,
   showSupportPolygons = false,
   showLabelBoxes = false,
+  showSeedPoints = false,
+  showSeedLines = false,
+  showAnchors = true,
   colorAnchorsByDerivation = false,
 }: DraftMapPreviewProps) {
   return (
     <div
       className="relative overflow-hidden rounded-2xl border border-white/10 bg-black/30"
-      style={{ aspectRatio: `${draft.image.width} / ${draft.image.height}` }}
+      style={{ aspectRatio: `${imageAsset.width} / ${imageAsset.height}` }}
     >
       {/* Keep the uploaded image and overlay in the same coordinate space so draft geometry stays aligned while scaling. */}
       <Image
-        src={draft.image.src}
+        src={imageAsset.src}
         alt={draft.title}
         fill
+        priority
         unoptimized
         sizes="100vw"
         className="absolute inset-0 h-full w-full object-contain"
@@ -160,40 +177,102 @@ export function DraftMapPreview({
             })
           : null}
 
-        {draft.territories.map((territory) => {
-          const styles = anchorStyles(
-            colorAnchorsByDerivation,
-            territory.anchorDerivation,
-          );
+        {showSeedLines
+          ? draft.territories.map((territory) => {
+              if (!territory.seedPoint) {
+                return null;
+              }
 
-          return (
-            <g key={territory.id}>
-              <circle
-                cx={territory.anchor.x * draft.image.width}
-                cy={territory.anchor.y * draft.image.height}
-                r={6}
-                fill={styles.fill}
-                stroke={styles.stroke}
-                strokeWidth={2}
-                vectorEffect="non-scaling-stroke"
-              />
-              {showInlineLabels ? (
-                <text
-                  x={territory.anchor.x * draft.image.width + 9}
-                  y={territory.anchor.y * draft.image.height - 9}
-                  fill="white"
-                  fontSize={12}
-                  fontWeight={600}
-                  stroke="rgba(0,0,0,0.7)"
-                  strokeWidth={2}
-                  paintOrder="stroke"
-                >
-                  {territory.label}
-                </text>
-              ) : null}
-            </g>
-          );
-        })}
+              return (
+                <line
+                  key={`seed-line-${territory.id}`}
+                  x1={territory.seedPoint.x * draft.image.width}
+                  y1={territory.seedPoint.y * draft.image.height}
+                  x2={territory.anchor.x * draft.image.width}
+                  y2={territory.anchor.y * draft.image.height}
+                  stroke="rgba(34, 211, 238, 0.85)"
+                  strokeWidth={1.5}
+                  strokeDasharray="4 4"
+                  vectorEffect="non-scaling-stroke"
+                />
+              );
+            })
+          : null}
+
+        {showSeedPoints
+          ? draft.territories.flatMap((territory) => {
+              const elements: ReactNode[] = [];
+
+              if (territory.seedPoint) {
+                elements.push(
+                  <circle
+                    key={`seed-${territory.id}`}
+                    cx={territory.seedPoint.x * draft.image.width}
+                    cy={territory.seedPoint.y * draft.image.height}
+                    r={4}
+                    fill="rgba(34, 211, 238, 0.95)"
+                    stroke="rgba(8, 47, 73, 0.95)"
+                    strokeWidth={1.5}
+                    vectorEffect="non-scaling-stroke"
+                  />,
+                );
+              }
+
+              territory.supportSeedPoints.forEach((point, index) => {
+                elements.push(
+                  <circle
+                    key={`support-seed-${territory.id}-${index}`}
+                    cx={point.x * draft.image.width}
+                    cy={point.y * draft.image.height}
+                    r={3}
+                    fill="rgba(34, 211, 238, 0.55)"
+                    stroke="rgba(8, 47, 73, 0.65)"
+                    strokeWidth={1}
+                    vectorEffect="non-scaling-stroke"
+                  />,
+                );
+              });
+
+              return elements;
+            })
+          : null}
+
+        {showAnchors
+          ? draft.territories.map((territory) => {
+              const styles = anchorStyles(
+                colorAnchorsByDerivation,
+                territory.anchorDerivation,
+              );
+
+              return (
+                <g key={territory.id}>
+                  <circle
+                    cx={territory.anchor.x * draft.image.width}
+                    cy={territory.anchor.y * draft.image.height}
+                    r={6}
+                    fill={styles.fill}
+                    stroke={styles.stroke}
+                    strokeWidth={2}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  {showInlineLabels ? (
+                    <text
+                      x={territory.anchor.x * draft.image.width + 9}
+                      y={territory.anchor.y * draft.image.height - 9}
+                      fill="white"
+                      fontSize={12}
+                      fontWeight={600}
+                      stroke="rgba(0,0,0,0.7)"
+                      strokeWidth={2}
+                      paintOrder="stroke"
+                    >
+                      {territory.label}
+                    </text>
+                  ) : null}
+                </g>
+              );
+            })
+          : null}
       </svg>
     </div>
   );
