@@ -41,6 +41,13 @@ function anchorStyles(colorAnchorsByDerivation: boolean, derivation: string) {
     };
   }
 
+  if (derivation === "model-helper-centroid") {
+    return {
+      fill: "#f472b6",
+      stroke: "rgba(80, 7, 36, 0.95)",
+    };
+  }
+
   if (derivation === "model-seed-point") {
     return {
       fill: "#60a5fa",

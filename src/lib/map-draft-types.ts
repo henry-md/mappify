@@ -27,6 +27,7 @@ export type PolygonRegion = {
 
 export type AnchorDerivationMethod =
   | "model-vision"
+  | "model-helper-centroid"
   | "model-seed-point"
   | "segmented-region-center"
   | "support-mask-center"
@@ -61,6 +62,9 @@ export type DraftDebugArtifacts = {
   outlineHelperImage: ImageAsset | null;
   outlineHelperPrompt: string | null;
   outlineHelperModel: string | null;
+  outlineGridImage: ImageAsset | null;
+  gridLocalizationPrompt: string | null;
+  gridLocalizationModel: string | null;
 };
 
 export type ParsingMetadata = {

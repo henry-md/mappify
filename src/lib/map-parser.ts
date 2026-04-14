@@ -59,6 +59,26 @@ type RawParserPayload = {
   territories?: RawParserTerritory[];
 };
 
+type RawGridLocalizationTerritory = {
+  batchSlot?: number;
+  label?: string;
+  gridCell?: {
+    column?: string;
+    row?: number;
+  };
+  confidence?: number;
+  notes?: string[];
+};
+
+type RawGridLocalizationPayload = {
+  summary?: string;
+  warnings?: string[];
+  territories?: RawGridLocalizationTerritory[];
+};
+
+const GRID_COLUMN_LABELS = "ABCDEFGHIJKLMNOPQRST".split("");
+const GRID_ROW_COUNT = 30;
+
 const SEEDED_PRIOR_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -233,6 +253,56 @@ const MODEL_GEOMETRY_SCHEMA = {
                     },
                   },
                 },
+              },
+            },
+          },
+          confidence: { type: "number" },
+          notes: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+const GRID_LOCALIZATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "warnings", "territories"],
+  properties: {
+    summary: { type: "string" },
+    warnings: {
+      type: "array",
+      items: { type: "string" },
+    },
+    territories: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["batchSlot", "label", "gridCell", "confidence", "notes"],
+        properties: {
+          batchSlot: {
+            type: "integer",
+            minimum: 1,
+            maximum: 100,
+          },
+          label: { type: "string" },
+          gridCell: {
+            type: "object",
+            additionalProperties: false,
+            required: ["column", "row"],
+            properties: {
+              column: {
+                type: "string",
+                enum: GRID_COLUMN_LABELS,
+              },
+              row: {
+                type: "integer",
+                minimum: 1,
+                maximum: GRID_ROW_COUNT,
               },
             },
           },
@@ -461,6 +531,55 @@ function buildOutlineHelperPrompt({
   ].join("\n");
 }
 
+function buildGridLocalizationPrompt({
+  title,
+  inferredSubject,
+  batchTargets,
+}: {
+  title: string;
+  inferredSubject: string | null;
+  batchTargets: Array<{
+    batchSlot: number;
+    target: NormalizedSemanticTarget;
+  }>;
+}) {
+  const targetList = batchTargets
+    .map(
+      ({ batchSlot, target }) =>
+        `${batchSlot}. ${target.label}${target.labelBox ? " (use the rendered label in the original image to confirm this region)" : ""}`,
+    )
+    .join("\n");
+
+  return [
+    "You are choosing one red-grid cell for each named territory in this batch.",
+    "You will receive two aligned images of the same subject:",
+    "1. the original labeled image",
+    "2. the helper image with a red grid overlaid on top of it",
+    "The second image is the coordinate reference image.",
+    "The helper image contains only a black background and gold region borders, plus the deterministic red grid overlay.",
+    "The red grid columns are labeled across the top with letters and the rows are labeled down the left side with numbers.",
+    "Return one result for every listed territory.",
+    "For each territory, return the exact batchSlot and label from the list below, plus the single grid cell whose center is the safest interior point for that territory.",
+    "Do not return pixels, decimals, or free-form coordinates.",
+    "Return only red-grid cell coordinates, using the visible column label and row number.",
+    "Choose a cell whose center lies clearly inside the territory, not on a border, not outside the shape, and not in the black background.",
+    "If several cells would work, prefer the one whose center is visually central and safest.",
+    "Use the original labeled image to identify which region corresponds to each name.",
+    "Use the red-grid helper image to judge the actual region boundaries.",
+    "First identify what real place, anatomy subject, or diagram subject the images depict.",
+    inferredSubject
+      ? `The current semantic pass believes the subject is: ${inferredSubject}. Use that for context unless the images clearly contradict it.`
+      : "Infer the subject from the images before resolving ambiguous regions.",
+    "If it depicts a recognizable real-world region, use common reference maps of that region if any adjacency or coastline is ambiguous.",
+    "If it depicts a recognizable anatomy or educational diagram, use common reference diagrams of that subject if a boundary is stylized or unclear.",
+    "If the territory is tiny or uncertain, still return the best cell and mention the uncertainty in notes.",
+    "Do not omit any territory. Do not add extra territories. Keep batchSlot values unchanged.",
+    `Image title: ${title}`,
+    "Batch targets:",
+    targetList,
+  ].join("\n");
+}
+
 function buildModelGeometryPrompt(preference: GeometryPreference) {
   return [
     "You are drafting interactive quiz geometry for an uploaded map or diagram.",
@@ -556,6 +675,45 @@ function normalizeSemanticTargets(
     rawTerritories,
     normalizedTargets,
   };
+}
+
+function gridCellToNormalizedPoint(cell?: { column?: string; row?: number }) {
+  const columnIndex = GRID_COLUMN_LABELS.indexOf(cell?.column?.toUpperCase() ?? "");
+
+  if (
+    columnIndex < 0 ||
+    cell?.row === undefined ||
+    !Number.isFinite(cell.row) ||
+    cell.row < 1 ||
+    cell.row > GRID_ROW_COUNT
+  ) {
+    return null;
+  }
+
+  return {
+    x: clamp01((columnIndex + 0.5) / GRID_COLUMN_LABELS.length),
+    y: clamp01((cell.row - 0.5) / GRID_ROW_COUNT),
+  } satisfies NormalizedPoint;
+}
+
+function getRegionDetectionBatchSize() {
+  const parsed = Number.parseInt(process.env.REGION_DETECTION_BATCH_SIZE ?? "", 10);
+
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 10;
+  }
+
+  return Math.min(parsed, 50);
+}
+
+function chunkArray<T>(items: T[], chunkSize: number) {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+
+  return chunks;
 }
 
 function buildDerivedPayload({
@@ -943,7 +1101,284 @@ async function generateOutlineHelperImage({
       outlineHelperImage,
       outlineHelperPrompt: prompt,
       outlineHelperModel: outlineModel,
+      outlineGridImage: null,
+      gridLocalizationPrompt: null,
+      gridLocalizationModel: null,
     },
+  };
+}
+
+function buildOutlineGridSvg(width: number, height: number) {
+  const cellWidth = width / GRID_COLUMN_LABELS.length;
+  const cellHeight = height / GRID_ROW_COUNT;
+  const verticalLines = Array.from({ length: GRID_COLUMN_LABELS.length + 1 }, (_, index) => {
+    const x = Math.round(index * cellWidth * 100) / 100;
+    return `<line x1="${x}" y1="0" x2="${x}" y2="${height}" stroke="#ff3b30" stroke-opacity="0.38" stroke-width="1" />`;
+  }).join("");
+  const horizontalLines = Array.from({ length: GRID_ROW_COUNT + 1 }, (_, index) => {
+    const y = Math.round(index * cellHeight * 100) / 100;
+    return `<line x1="0" y1="${y}" x2="${width}" y2="${y}" stroke="#ff3b30" stroke-opacity="0.38" stroke-width="1" />`;
+  }).join("");
+  const columnLabels = GRID_COLUMN_LABELS.map((label, index) => {
+    const x = (index + 0.5) * cellWidth;
+    return `<text x="${x}" y="14" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#ff6b66" font-weight="700">${label}</text>`;
+  }).join("");
+  const rowLabels = Array.from({ length: GRID_ROW_COUNT }, (_, index) => {
+    const y = (index + 0.5) * cellHeight + 4;
+    return `<text x="8" y="${y}" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#ff6b66" font-weight="700">${index + 1}</text>`;
+  }).join("");
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      ${verticalLines}
+      ${horizontalLines}
+      ${columnLabels}
+      ${rowLabels}
+    </svg>
+  `;
+}
+
+async function generateOutlineGridImage({
+  draftId,
+  outlineBuffer,
+  width,
+  height,
+}: {
+  draftId: string;
+  outlineBuffer: Buffer;
+  width: number;
+  height: number;
+}) {
+  const gridBuffer = await sharp(outlineBuffer)
+    .composite([
+      {
+        input: Buffer.from(buildOutlineGridSvg(width, height)),
+        blend: "over",
+      },
+    ])
+    .png()
+    .toBuffer();
+  const outlineGridImage = await saveDerivedImageAsset({
+    draftId,
+    stem: "outline-grid",
+    buffer: gridBuffer,
+    mimeType: "image/png",
+    originalFilename: "outline-grid.png",
+  });
+
+  return {
+    buffer: gridBuffer,
+    asset: outlineGridImage,
+  };
+}
+
+async function parseRawPayloadWithGridLocalization({
+  client,
+  model,
+  title,
+  inferredSubject,
+  batchTargets,
+  originalDataUrl,
+  gridDataUrl,
+}: {
+  client: OpenAI;
+  model: string;
+  title: string;
+  inferredSubject: string | null;
+  batchTargets: Array<{
+    batchSlot: number;
+    target: NormalizedSemanticTarget;
+  }>;
+  originalDataUrl: string;
+  gridDataUrl: string;
+}) {
+  const response = await client.responses.parse({
+    model,
+    text: {
+      format: {
+        type: "json_schema",
+        name: "outline_grid_localization",
+        strict: true,
+        description:
+          "Structured red-grid cell localization for a batch of named territories on an outline helper image.",
+        schema: GRID_LOCALIZATION_SCHEMA,
+      },
+      verbosity: "medium",
+    },
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: buildGridLocalizationPrompt({
+              title,
+              inferredSubject,
+              batchTargets,
+            }),
+          },
+          {
+            type: "input_image",
+            image_url: originalDataUrl,
+            detail: "high",
+          },
+          {
+            type: "input_image",
+            image_url: gridDataUrl,
+            detail: "high",
+          },
+        ],
+      },
+    ],
+  });
+
+  if (!response.output_parsed) {
+    throw new Error("The model did not return structured grid localization.");
+  }
+
+  return response.output_parsed as RawGridLocalizationPayload;
+}
+
+async function localizeTargetsWithGridImage({
+  client,
+  model,
+  title,
+  inferredSubject,
+  originalDataUrl,
+  gridDataUrl,
+  targets,
+}: {
+  client: OpenAI;
+  model: string;
+  title: string;
+  inferredSubject: string | null;
+  originalDataUrl: string;
+  gridDataUrl: string;
+  targets: NormalizedSemanticTarget[];
+}) {
+  const batchSize = getRegionDetectionBatchSize();
+  const targetBatches = chunkArray(
+    targets.map((target, originalIndex) => ({
+      originalIndex,
+      target,
+    })),
+    batchSize,
+  );
+  const batchResults = await Promise.all(
+    targetBatches.map(async (batchTargets, batchIndex) => {
+      const numberedBatchTargets = batchTargets.map(({ originalIndex, target }, index) => ({
+        batchSlot: index + 1,
+        originalIndex,
+        target,
+      }));
+
+      try {
+        const payload = await parseRawPayloadWithGridLocalization({
+          client,
+          model,
+          title,
+          inferredSubject,
+          batchTargets: numberedBatchTargets,
+          originalDataUrl,
+          gridDataUrl,
+        });
+
+        return {
+          rangeStart: batchIndex * batchSize + 1,
+          rangeEnd: batchIndex * batchSize + batchTargets.length,
+          batchTargets: numberedBatchTargets,
+          payload,
+          warnings: (payload.warnings ?? []).filter(Boolean),
+        };
+      } catch (error) {
+        return {
+          rangeStart: batchIndex * batchSize + 1,
+          rangeEnd: batchIndex * batchSize + batchTargets.length,
+          batchTargets: numberedBatchTargets,
+          payload: null,
+          warnings: [
+            error instanceof Error ? error.message : "Unknown localization error.",
+          ],
+        };
+      }
+    }),
+  );
+
+  const updatedTargets = targets.slice();
+  const warnings: string[] = [];
+
+  for (const batchResult of batchResults) {
+    warnings.push(
+      ...batchResult.warnings.map((warning) =>
+        `Grid localization batch ${batchResult.rangeStart}-${batchResult.rangeEnd}: ${warning}`,
+      ),
+    );
+
+    if (!batchResult.payload) {
+      continue;
+    }
+
+    const territoryByBatchSlot = new Map(
+      (batchResult.payload.territories ?? []).map((territory) => [
+        territory.batchSlot ?? -1,
+        territory,
+      ]),
+    );
+    const territoryByLabel = new Map(
+      (batchResult.payload.territories ?? []).map((territory) => [
+        territory.label?.trim().toLowerCase() ?? "",
+        territory,
+      ]),
+    );
+
+    for (const { batchSlot, originalIndex, target } of batchResult.batchTargets) {
+      const matchedTerritory =
+        territoryByBatchSlot.get(batchSlot) ??
+        territoryByLabel.get(target.label.trim().toLowerCase()) ??
+        null;
+      const localized = gridCellToNormalizedPoint(matchedTerritory?.gridCell);
+
+      if (!matchedTerritory) {
+        warnings.push(
+          `Grid localization batch ${batchResult.rangeStart}-${batchResult.rangeEnd} omitted ${target.label}, so the earlier semantic seed was kept.`,
+        );
+
+        continue;
+      }
+
+      const originalSeed = target.seedPoint;
+      const supportSeedPoints = [
+        ...(originalSeed ? [originalSeed] : []),
+        ...target.supportSeedPoints,
+      ];
+
+      updatedTargets[originalIndex] = {
+        ...target,
+        seedPoint: localized ?? target.seedPoint,
+        supportSeedPoints,
+        rawConfidence:
+          localized && matchedTerritory.confidence !== undefined
+            ? clamp01(
+                (target.rawConfidence + clamp01(matchedTerritory.confidence)) / 2,
+              )
+            : target.rawConfidence,
+        rawNotes: [
+          ...target.rawNotes,
+          ...(matchedTerritory.notes?.filter(Boolean) ?? []),
+        ],
+      } satisfies NormalizedSemanticTarget;
+
+      if (!localized) {
+        warnings.push(
+          `Grid localization batch ${batchResult.rangeStart}-${batchResult.rangeEnd} returned an invalid cell for ${target.label}, so the earlier semantic seed was kept.`,
+        );
+      }
+    }
+  }
+
+  return {
+    targets: updatedTargets,
+    warnings,
   };
 }
 
@@ -952,16 +1387,19 @@ async function normalizeOutlinePayload({
   preference,
   model,
   outlineBuffer,
+  normalizedTargetsOverride,
 }: {
   payload: RawParserPayload;
   preference: GeometryPreference;
   model: string | null;
   outlineBuffer: Buffer;
+  normalizedTargetsOverride?: NormalizedSemanticTarget[];
 }): Promise<ParsedDraftPayload> {
-  const { rawTerritories, normalizedTargets } = normalizeSemanticTargets(
+  const { rawTerritories, normalizedTargets: baseTargets } = normalizeSemanticTargets(
     payload,
     preference,
   );
+  const normalizedTargets = normalizedTargetsOverride ?? baseTargets;
 
   if (rawTerritories.length === 0) {
     return fallbackParsedPayload({
@@ -1084,6 +1522,9 @@ export async function parseDraftFromImage({
     outlineHelperImage: null,
     outlineHelperPrompt: null,
     outlineHelperModel: null,
+    outlineGridImage: null,
+    gridLocalizationPrompt: null,
+    gridLocalizationModel: null,
   };
 
   if (!apiKey) {
@@ -1150,15 +1591,56 @@ export async function parseDraftFromImage({
         sourceHeight: originalRaster.height,
       });
 
-      debug = outlineHelper.debug;
+      const normalizedTargets = normalizeSemanticTargets(
+        rawPayload,
+        geometryPreference,
+      ).normalizedTargets;
+      const outlineGrid = await generateOutlineGridImage({
+        draftId,
+        outlineBuffer: outlineHelper.buffer,
+        width: originalRaster.width,
+        height: originalRaster.height,
+      });
+      const representativeBatchTargets = normalizedTargets
+        .slice(0, getRegionDetectionBatchSize())
+        .map((target, index) => ({
+          batchSlot: index + 1,
+          target,
+        }));
+      debug = {
+        ...outlineHelper.debug,
+        outlineGridImage: outlineGrid.asset,
+        gridLocalizationPrompt: representativeBatchTargets.length > 0
+          ? buildGridLocalizationPrompt({
+              title,
+              inferredSubject: rawPayload.inferredSubject?.trim() || null,
+              batchTargets: representativeBatchTargets,
+            })
+          : null,
+        gridLocalizationModel: model,
+      };
+      const gridLocalization = await localizeTargetsWithGridImage({
+        client,
+        model,
+        title,
+        inferredSubject: rawPayload.inferredSubject?.trim() || null,
+        originalDataUrl: dataUrl,
+        gridDataUrl: `data:image/png;base64,${outlineGrid.buffer.toString("base64")}`,
+        targets: normalizedTargets,
+      });
+      const outlinePayload = await normalizeOutlinePayload({
+        payload: rawPayload,
+        preference: geometryPreference,
+        model,
+        outlineBuffer: outlineHelper.buffer,
+        normalizedTargetsOverride: gridLocalization.targets,
+      });
 
       return {
-        payload: await normalizeOutlinePayload({
-          payload: rawPayload,
-          preference: geometryPreference,
-          model,
-          outlineBuffer: outlineHelper.buffer,
-        }),
+        payload: {
+          ...outlinePayload,
+          warnings: [...gridLocalization.warnings, ...outlinePayload.warnings],
+        },
         provider: "openai",
         model,
         strategy: geometryStrategy,

@@ -73,7 +73,10 @@ The current default path is outline-helper generation:
 - ask OpenAI vision for labels, label boxes, and interior seed points directly from the original image
 - ask an OpenAI image model to generate a helper image with a black background and gold boundary lines only
 - rescale that helper image back onto the original canvas
-- trace enclosed regions from the helper image and match them back to the semantic seeds from the original image
+- deterministically overlay a red reference grid onto the helper image
+- make a second OpenAI localization pass that picks one grid cell per target batch using the original labeled image plus the red-grid helper image
+- split those batches by `REGION_DETECTION_BATCH_SIZE` and run them in parallel on the backend
+- snap those grid picks into helper-image regions, with contour tracing still available as a fallback if a raw pick needs refinement
 - keep all coordinates normalized to the source image so the overlay stays aligned
 
 There are also alternate paths retained behind environment toggles:
